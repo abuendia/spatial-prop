@@ -76,7 +76,7 @@ def evaluate(model, test_loader, device="cuda"):
     print("\nEvaluation Results (Correlation by Cell Type):")
     for cell_type, metrics in correlation_results.items():
         print(f"{cell_type}: Pearson={metrics['Pearson']:.4f}, Spearman={metrics['Spearman']:.4f}, R2={metrics['R2']:.4f}")
-        wandb.log({f"{cell_type}_pearson": metrics['Pearson'], f"{cell_type}_spearman": metrics['Spearman']})
+        wandb.log({f"barplot_{cell_type}": wandb.plots.bar({"Pearson": metrics['Pearson'], "Spearman": metrics['Spearman'], "R2": metrics['R2']})})
 
     return correlation_results  # Return results as a dictionary for further analysis
 
