@@ -53,6 +53,7 @@ def main():
     parser.add_argument("learning_rate", help="learning rate", type=float)
     parser.add_argument("loss", help="loss: balanced_mse, npcc, mse, l1", type=str)
     parser.add_argument("epochs", help="number of epochs", type=int)
+    parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     args = parser.parse_args()
 
     # Load dataset configurations
@@ -93,6 +94,15 @@ def main():
         name=exp_name,
     )
 
+    # Load gene list if provided
+    gene_list = None
+    if args.gene_list is not None:
+        try:
+            with open(args.gene_list, 'r') as f:
+                gene_list = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
+
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
                                             target="expression",
@@ -103,7 +113,8 @@ def main():
                                             num_cells_per_ct_id=100,
                                             center_celltypes=center_celltypes,
                                             use_ids=train_ids,
-                                            file_path=file_path)
+                                            file_path=file_path,
+                                            gene_list=gene_list)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         target="expression",
@@ -114,7 +125,8 @@ def main():
                                         num_cells_per_ct_id=100,
                                         center_celltypes=center_celltypes,
                                         use_ids=test_ids,
-                                        file_path=file_path)
+                                        file_path=file_path,
+                                        gene_list=gene_list)
                                             
     test_dataset.process()
     print("Finished processing test dataset", flush=True)

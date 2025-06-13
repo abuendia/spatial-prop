@@ -49,7 +49,7 @@ class SpatialAgingCellDataset(Dataset):
         transform [None] - not implemented
         pre_transform [None] - not implemented
         raw_filepaths [lst of str] - list of paths to anndata .h5ad files of spatial transcriptomics data
-        gene_list_path [str] - path to where text file containing all gene features is (will fill in missing values for each dataset)
+        gene_list [str or None] - path to file containing list of genes to use, or None to compute from AnnData
         processed_folder_name [str] - path to save processed data files
         subfolder_name [str] - name of subfolder to save in (e.g. "train")
         target [str] - name of target label to use ("aging", "age", "num_neuron")
@@ -70,16 +70,8 @@ class SpatialAgingCellDataset(Dataset):
                  root=".", 
                  transform=None, 
                  pre_transform=None,
-                 raw_filepaths=["/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/aging_coronal.h5ad",
-                                # "data/anndata/aging_sagittal.h5ad",
-                                "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/exercise.h5ad",
-                                "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/reprogramming.h5ad",],
-                                # "data/anndata/allen_aging_lps_spatialsmooth_spage.h5ad",
-                                # "data/anndata/androvic_injuryMERFISH_spatialsmooth_spage.h5ad",
-                                # "data/anndata/kukanja_ISSMS_spatialsmooth_spage_mapped.h5ad",
-                                # "data/anndata/pilotraw_merfish_spatialsmooth_spage.h5ad",],
-                                # #"data/anndata/zeng_starmapAD_spatialsmooth_spage.h5ad",],
-                 gene_list_path = "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/gnn_model/gene_list300.txt",#"data/gene_list.txt",
+                 raw_filepaths=None,
+                 gene_list=None,
                  processed_folder_name="data/gnn_datasets",
                  subfolder_name=None,
                  target="expression",
@@ -120,7 +112,7 @@ class SpatialAgingCellDataset(Dataset):
         self.transform=transform
         self.pre_transform=pre_transform
         self.raw_filepaths=raw_filepaths
-        self.gene_list_path = gene_list_path
+        self.gene_list = gene_list
         self.processed_folder_name=processed_folder_name
         self.subfolder_name=subfolder_name
         self.target=target
@@ -174,7 +166,13 @@ class SpatialAgingCellDataset(Dataset):
             aug_key = int(self.augment_cutoff*100)
             
         # read in genes
-        gene_names = np.genfromtxt(self.gene_list_path, dtype='unicode')
+        if self.gene_list is not None:
+            # Load gene list from file
+            gene_names = np.genfromtxt(self.gene_list, dtype='unicode')
+        else:
+            # Compute gene list from first AnnData file
+            adata = sc.read_h5ad(self.raw_filepaths[0])
+            gene_names = adata.var_names.values
         
         for rfi, raw_filepath in enumerate(self.raw_filepaths):
             # load raw data

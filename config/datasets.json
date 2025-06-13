@@ -43,16 +43,16 @@
             "MsBrainAgingSpatialDonor_14_0",
             "MsBrainAgingSpatialDonor_1_0"
         ],
-        "file_name": "allen.h5ad"
+        "file_name": "allen_aging_lps_spatialsmooth_spage.h5ad"
     },
     "kukanja": {
         "train_ids": ["CNTRL_PEAK_B_R2", "CNTRL_PEAK_B_R3", "CNTRL_PEAK_B_R4", "EAE_PEAK_B_R2", "EAE_PEAK_B_R3", "EAE_PEAK_B_R4"],
         "test_ids": ["CNTRL_PEAK_B_R1", "EAE_PEAK_B_R1"],
-        "file_name": "kukanja.h5ad"
+        "file_name": "kukanja_ISSMS_spatialsmooth_spage.h5ad"
     },
     "pilot": {
         "train_ids": ["Middle1", "Old1", "Old2", "Young1", "Young2"],
         "test_ids": ["Middle2"],
-        "file_name": "pilot.h5ad"
+        "file_name": "pilotraw_merfish_spatialsmooth_spage.h5ad"
     }
 } 
