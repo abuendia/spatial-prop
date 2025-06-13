@@ -43,16 +43,16 @@ def load_dataset_config():
 def main():
     # set up arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument("dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
-    parser.add_argument("base_path", help="Base path to the data directory", type=str)
-    parser.add_argument("k_hop", help="k-hop neighborhood size", type=int)
-    parser.add_argument("augment_hop", help="number of hops to take for graph augmentation", type=int)
-    parser.add_argument("center_celltypes", help="cell type labels to center graphs on, separated by comma", type=str)
-    parser.add_argument("node_feature", help="node features key, e.g. 'celltype_age_region'", type=str)
-    parser.add_argument("inject_feature", help="inject features key, e.g. 'center_celltype'", type=str)
-    parser.add_argument("learning_rate", help="learning rate", type=float)
-    parser.add_argument("loss", help="loss: balanced_mse, npcc, mse, l1", type=str)
-    parser.add_argument("epochs", help="number of epochs", type=int)
+    parser.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str, required=True)
+    parser.add_argument("--base_path", help="Base path to the data directory", type=str, required=True)
+    parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
+    parser.add_argument("--augment_hop", help="number of hops to take for graph augmentation", type=int, required=True)
+    parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
+    parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
+    parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
+    parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
+    parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
+    parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     args = parser.parse_args()
 
@@ -70,7 +70,15 @@ def main():
     file_path = os.path.join(args.base_path, dataset_config['file_name'])
     k_hop = args.k_hop
     augment_hop = args.augment_hop
-    center_celltypes = args.center_celltypes.split(",")
+    
+    # Handle center_celltypes
+    if args.center_celltypes.lower() == 'none':
+        center_celltypes = None
+    elif args.center_celltypes.lower() == 'all':
+        center_celltypes = 'all'
+    else:
+        center_celltypes = args.center_celltypes.split(",")
+    
     node_feature = args.node_feature
     inject_feature = args.inject_feature
     learning_rate = args.learning_rate
