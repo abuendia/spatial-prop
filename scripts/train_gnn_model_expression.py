@@ -118,8 +118,8 @@ def main():
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, pin_memory=True, num_workers=0, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=True, pin_memory=True, num_workers=0, prefetch_factor=None, persistent_workers=False) # shuffle=True to reduce bias in batch-wise metric estimates
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False) # shuffle=True to reduce bias in batch-wise metric estimates
 
     print(len(train_dataset), flush=True)
     print(len(test_dataset), flush=True)

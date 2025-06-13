@@ -70,16 +70,15 @@ class SpatialAgingCellDataset(Dataset):
                  root=".", 
                  transform=None, 
                  pre_transform=None,
-                 raw_filepaths=["/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/sampled_adata/aging_coronal_balanced.h5ad",
+                 raw_filepaths=["/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/aging_coronal.h5ad",
                                 # "data/anndata/aging_sagittal.h5ad",
-                                # "data/anndata/exercise.h5ad",
-                                # "data/anndata/reprogramming.h5ad",],
+                                "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/exercise.h5ad",
+                                "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/raw/reprogramming.h5ad",],
                                 # "data/anndata/allen_aging_lps_spatialsmooth_spage.h5ad",
                                 # "data/anndata/androvic_injuryMERFISH_spatialsmooth_spage.h5ad",
                                 # "data/anndata/kukanja_ISSMS_spatialsmooth_spage_mapped.h5ad",
                                 # "data/anndata/pilotraw_merfish_spatialsmooth_spage.h5ad",],
                                 # #"data/anndata/zeng_starmapAD_spatialsmooth_spage.h5ad",],
-                 ],
                  gene_list_path = "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/gnn_model/gene_list300.txt",#"data/gene_list.txt",
                  processed_folder_name="data/gnn_datasets",
                  subfolder_name=None,
@@ -247,6 +246,10 @@ class SpatialAgingCellDataset(Dataset):
                 if self.node_feature == "gaussian":
                     # random gaussian noise as features
                     node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
+                
+                if "X_spatial" in sub_adata.obsm:
+                    precomputed_embed = torch.tensor(sub_adata.obsm["spatial"]).float()
+                    node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
                 
                 ### Get Indices of Random Center Cells
                 cell_idxs = []

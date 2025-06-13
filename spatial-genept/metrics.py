@@ -3,33 +3,30 @@ from sklearn.metrics import adjusted_rand_score, adjusted_mutual_info_score
 from sklearn.cluster import KMeans
 
 
-def compute_ari_ami(adata, embedding_key, label_key):
+def compute_ari_ami(cell_list, embeddings, labels):
     """
-    Compute ARI and AMI on embeddings from an anndata object.
-
-    Parameters:
-    - adata: AnnData object containing embeddings and labels.
-    - embedding_key: Key to retrieve embeddings from adata.obsm.
-    - label_key: Key to retrieve labels from adata.obs.
-
-    Returns:
-    - ari: Adjusted Rand Index
-    - ami: Adjusted Mutual Information
+    Compute ARI and AMI for the given embeddings and labels.
+    :param cell_list: List of cell ids
+    :param embeddings: Dictionary of cell id to embedding
+    :param labels: Dictionary of cell id to label
     """
-    # Retrieve embeddings and labels
-    embeddings = adata.obsm[embedding_key]
-    labels = adata.obs[label_key].values
-
     # Check for consistency
-    if embeddings.shape[0] != len(labels):
+    if len(embeddings) != len(labels):
         raise ValueError("Number of embeddings and labels do not match.")
 
-    n_clusters = len(np.unique(labels))  # Number of unique labels
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    cluster_labels = kmeans.fit_predict(embeddings)
+    # reoder embeddings and labels 
+    new_embeddings = []
+    new_labels = []
+    for cell in cell_list:
+        new_embeddings.append(embeddings[cell])
+        new_labels.append(labels[cell])
 
+    n_clusters = len(np.unique(new_labels))  # Number of unique labels
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(new_embeddings)
+    
     # Compute ARI and AMI
-    ari = adjusted_rand_score(labels, cluster_labels)
-    ami = adjusted_mutual_info_score(labels, cluster_labels)
+    ari = adjusted_rand_score(new_labels, cluster_labels)
+    ami = adjusted_mutual_info_score(new_labels, cluster_labels)
 
     return ari, ami

@@ -158,3 +158,62 @@ def get_available_cpu_ids():
     result = subprocess.run("numactl --show | grep 'physcpubind'", shell=True, capture_output=True, text=True)
     cpu_ids = [int(cpu) for cpu in result.stdout.split("physcpubind:")[1].strip().split(' ')]
     return cpu_ids
+
+
+def get_entrez_gene_summary(
+    gene_name, email="alb2281@columbia.edu", organism="human", max_gene_ids=100
+):
+    """Returns the 'Summary' contents for provided input
+    gene from the Entrez Gene database. All gene IDs 
+    returned for input gene_name will have their docsum
+    summaries 'fetched'.
+    
+    Args:
+        gene_name (string): Official (HGNC) gene name 
+           (e.g., 'KAT2A')
+        email (string): Required email for making requests
+        organism (string, optional): defaults to human. 
+           Filters results only to match organism. Set to None
+           to return all organism unfiltered.
+        max_gene_ids (int, optional): Sets the number of Gene
+           ID results to return (absolute max allowed is 10K).
+        
+    Returns:
+        dict: Summaries for all gene IDs associated with 
+           gene_name (where: keys → [orgn][gene name],
+                      values → gene summary)
+    """
+    Entrez.email = email
+
+    query = (
+        f"{gene_name}[Gene Name]"
+        if not organism
+        else f"({gene_name}[Gene Name]) AND {organism}[Organism]"
+    )
+    handle = Entrez.esearch(db="gene", term=query, retmax=max_gene_ids)
+    record = Entrez.read(handle)
+    handle.close()
+
+    gene_ids = record["IdList"]
+    if len(gene_ids) > 1:
+        print("More than 1 gene ID returned for gene name")
+    gene_id = gene_ids[0]
+
+    # print(
+    #     f"{len(gene_ids)} gene IDs returned associated with gene {gene_name}."
+    # )
+    # print(f"\tRetrieving summary for {gene_id}...")
+    handle = Entrez.efetch(db="gene", id=gene_id, rettype="docsum")
+    gene_dict = xmltodict.parse(
+        "".join([x.decode(encoding="utf-8") for x in handle.readlines()]),
+        dict_constructor=dict,
+    )
+    gene_docsum = gene_dict["eSummaryResult"]["DocumentSummarySet"][
+        "DocumentSummary"
+    ]
+    summary = gene_docsum.get("Summary")
+    handle.close()
+    time.sleep(0.34)  # Requests to NCBI are rate limited to 3 per second
+
+    return summary
+

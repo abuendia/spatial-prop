@@ -16,6 +16,35 @@ image_model = "gpt-4o"
 embedding_model = "text-embedding-ada-002"
 
 
+def compute_genepts_embedding(task, use_gene_names=False, use_counts=False, use_description=False):
+    """Computes the gene pathway embedding for a given cell."""
+    cell_id, adata_sampled, description = task
+    client = OpenAI(api_key=gpt_key)
+    umi_counts = adata_sampled[cell_id].X[0].tolist()
+    gene_names = adata_sampled.var.index.tolist()
+    
+    # Sort gene names by umi count (highest first)
+    umi_counts, gene_names = zip(*sorted(zip(umi_counts, gene_names), reverse=True))
+    
+    if use_gene_names:
+        input_prompt = [f"{gene}" for gene in gene_names]
+        input_prompt = ' '.join(input_prompt).upper()
+    elif use_counts:
+        input_prompt = [f"{gene} {count}" for gene, count in zip(gene_names, umi_counts)]
+        input_prompt = ' '.join(input_prompt).upper()
+    else:
+        input_prompt = ""
+    
+    if use_description:
+        input_prompt += f"\n\n{description}"
+    
+    response = client.embeddings.create(
+        input=input_prompt,
+        model=embedding_model,
+    )
+    return cell_id, response.data[0].embedding, input_prompt
+
+
 def compute_spatial_description(task):
     """Computes the spatial description for a given cell image."""
     cell_id, image_path = task
@@ -44,48 +73,6 @@ def compute_spatial_description(task):
     return cell_id, response.choices[0].message.content
 
 
-def process_spatial_descriptions(adata, output_path, num_workers):
-    """Parallelizes the spatial description computation across multiple processes."""
-    image_dir = "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/image_cell_crops/balanced_sample_denoised"
-    task_list = [
-        (cell_id, os.path.join(image_dir, f"{cell_id}-z1.jpeg"))
-        for cell_id in adata.obs_names if os.path.exists(os.path.join(image_dir, f"{cell_id}-z1.jpeg"))
-    ]
-    
-    results = {}
-    print("Entering multiprocessing...")
-    with multiprocessing.Pool(processes=num_workers) as pool:
-        for cell_id, result in tqdm(pool.imap(compute_spatial_description, task_list), total=len(task_list), desc="Processing spatial descriptions"):
-            results[cell_id] = result
-    
-    with open(output_path, "w") as f:
-        json.dump(results, f)
-
-def compute_genepts_embedding(task):
-    """Computes the gene pathway embedding for a given cell."""
-    cell_id, adata_sampled, description = task
-    client = OpenAI(api_key=gpt_key)
-    umi_counts = adata_sampled[cell_id].X[0].tolist()
-    gene_names = adata_sampled.var.index.tolist()
-    
-    # Sort gene names by umi count (highest first)
-    umi_counts, gene_names = zip(*sorted(zip(umi_counts, gene_names), reverse=True))
-    
-    # Create string of gene followed by count 
-    gene_names = [f"{gene} {count}" for gene, count in zip(gene_names, umi_counts)]
-    # Add the cell description to the input prompt
-    input_prompt = description
-    # input_prompt = ' '.join(gene_names).upper()
-    # if description:
-    #     input_prompt += f"\n\n{description}"
-    
-    response = client.embeddings.create(
-        input=input_prompt,
-        model=embedding_model,
-    )
-    return cell_id, response.data[0].embedding, input_prompt
-
-
 def process_genepts_embeddings(adata, cell_id_to_description, output_path, num_workers):
     """Parallelizes the gene pathway embedding computation across multiple processes."""
     task_list = [
@@ -103,6 +90,36 @@ def process_genepts_embeddings(adata, cell_id_to_description, output_path, num_w
         json.dump(results, f)
 
 
+def process_spatial_descriptions(adata, output_path, num_workers):
+    """Parallelizes the spatial description computation across multiple processes."""
+    image_dir = "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/merfish/image_cell_crops/balanced_sample_denoised"
+    task_list = [
+        (cell_id, os.path.join(image_dir, f"{cell_id}-z1.jpeg"))
+        for cell_id in adata.obs_names if os.path.exists(os.path.join(image_dir, f"{cell_id}-z1.jpeg"))
+    ]
+    
+    results = {}
+    print("Entering multiprocessing...")
+    with multiprocessing.Pool(processes=num_workers) as pool:
+        for cell_id, result in tqdm(pool.imap(compute_spatial_description, task_list), total=len(task_list), desc="Processing spatial descriptions"):
+            results[cell_id] = result
+    
+    with open(output_path, "w") as f:
+        json.dump(results, f)
+
+def compute_embeds_for_summaries(summaries, output_path):
+    client = OpenAI(api_key=gpt_key)
+    embeds = {}
+    for gene in tqdm(summaries):
+        input_prompt = summaries[gene]
+        response = client.embeddings.create(
+            input=input_prompt,
+            model=embedding_model,
+        )
+        embeds[gene] = response.data[0].embedding
+    with open(output_path, "w") as f:
+        json.dump(embeds, f)
+
 if __name__ == "__main__": 
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_workers", type=int, default=8)
@@ -118,3 +135,7 @@ if __name__ == "__main__":
     with open(cell_id_to_description, "r") as f:
         cell_id_to_description = json.load(f)
     process_genepts_embeddings(adata, cell_id_to_description, args.output_path, num_workers=args.num_workers)
+
+    # with open("/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/genept/GenePT_emebdding_v2/summaries_not_in_NCBI.json", "r") as f:
+    #     summaries = json.load(f)
+    # compute_embeds_for_summaries(summaries, "/oak/stanford/groups/jamesz/abuen/spatial-rotation/data/genept/GenePT_emebdding_v2/summaries_not_in_NCBI_embeds.json")
