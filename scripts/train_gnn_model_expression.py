@@ -7,6 +7,7 @@ from scipy.stats import pearsonr, spearmanr, ttest_ind
 import pickle
 import copy
 import os
+import json
 from sklearn.neighbors import BallTree
 from scipy.stats import mannwhitneyu, ttest_ind
 from statsmodels.stats.multitest import multipletests
@@ -28,10 +29,21 @@ import wandb
 
 from aging_gnn_model import *
 
+def load_dataset_config():
+    """Load dataset configurations from JSON file."""
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
+    except json.JSONDecodeError:
+        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
 
 def main():
     # set up arguments
     parser = argparse.ArgumentParser()
+    parser.add_argument("dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
     parser.add_argument("k_hop", help="k-hop neighborhood size", type=int)
     parser.add_argument("augment_hop", help="number of hops to take for graph augmentation", type=int)
     parser.add_argument("center_celltypes", help="cell type labels to center graphs on, separated by comma", type=str)
@@ -42,7 +54,17 @@ def main():
     parser.add_argument("epochs", help="number of epochs", type=int)
     args = parser.parse_args()
 
+    # Load dataset configurations
+    DATASET_CONFIGS = load_dataset_config()
+
+    # Validate dataset choice
+    if args.dataset not in DATASET_CONFIGS:
+        raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
+
     # load parameters from arguments
+    dataset_config = DATASET_CONFIGS[args.dataset]
+    train_ids = dataset_config['train_ids']
+    test_ids = dataset_config['test_ids']
     k_hop = args.k_hop
     augment_hop = args.augment_hop
     center_celltypes = args.center_celltypes.split(",")
@@ -63,29 +85,6 @@ def main():
     print(device, flush=True)
 
     # train
-    train_ids = [
-        ['1','101','14','19','30','38','42','46','53','61','7','70','75','80','86','97'], # aging coronal
-        # ['2','34','39','62','68'], # aging sagittal
-        ["YC1","YC2","YC3","OE1","OE2","OE3","OC1","OC2","OC3"], # exercise
-        ["YC1982","YC1990","YC1975","OT902","OT1160","OT1084","OC903","OC1226","OC1083"], # reprogramming
-        # ['MsBrainAgingSpatialDonor_10_0', 'MsBrainAgingSpatialDonor_10_1', 'MsBrainAgingSpatialDonor_10_2', 'MsBrainAgingSpatialDonor_11_0', 'MsBrainAgingSpatialDonor_11_1', 'MsBrainAgingSpatialDonor_11_2', 'MsBrainAgingSpatialDonor_12_0', 'MsBrainAgingSpatialDonor_12_1', 'MsBrainAgingSpatialDonor_13_1', 'MsBrainAgingSpatialDonor_13_2', 'MsBrainAgingSpatialDonor_14_1', 'MsBrainAgingSpatialDonor_15_0', 'MsBrainAgingSpatialDonor_15_1', 'MsBrainAgingSpatialDonor_16_0', 'MsBrainAgingSpatialDonor_16_1', 'MsBrainAgingSpatialDonor_17_0', 'MsBrainAgingSpatialDonor_17_1', 'MsBrainAgingSpatialDonor_18_0', 'MsBrainAgingSpatialDonor_18_1', 'MsBrainAgingSpatialDonor_19_0', 'MsBrainAgingSpatialDonor_19_1', 'MsBrainAgingSpatialDonor_19_2', 'MsBrainAgingSpatialDonor_2_0', 'MsBrainAgingSpatialDonor_2_1', 'MsBrainAgingSpatialDonor_3_0', 'MsBrainAgingSpatialDonor_3_1', 'MsBrainAgingSpatialDonor_4_0', 'MsBrainAgingSpatialDonor_4_1', 'MsBrainAgingSpatialDonor_4_2', 'MsBrainAgingSpatialDonor_5_0', 'MsBrainAgingSpatialDonor_5_1', 'MsBrainAgingSpatialDonor_5_2', 'MsBrainAgingSpatialDonor_6_0', 'MsBrainAgingSpatialDonor_6_1', 'MsBrainAgingSpatialDonor_6_2', 'MsBrainAgingSpatialDonor_7_0', 'MsBrainAgingSpatialDonor_7_1', 'MsBrainAgingSpatialDonor_7_2', 'MsBrainAgingSpatialDonor_8_0', 'MsBrainAgingSpatialDonor_8_1', 'MsBrainAgingSpatialDonor_8_2', 'MsBrainAgingSpatialDonor_9_1', 'MsBrainAgingSpatialDonor_9_2'], # allen
-        # None, # androvic
-        # ['CNTRL_PEAK_B_R2', 'CNTRL_PEAK_B_R3', 'CNTRL_PEAK_B_R4', 'EAE_PEAK_B_R2', 'EAE_PEAK_B_R3', 'EAE_PEAK_B_R4'], # kukanja
-        # ['Middle1', 'Old1', 'Old2', 'Young1', 'Young2'], # pilot
-    ]
-
-    # test
-    test_ids = [
-        ["11","33","57","93"], # aging coronal
-        # ['81'], # aging sagittal
-        ["YC4","OE4","OC4"], # exercise
-        ["YC1989","OT1125","OC1138"], # reprogramming
-        # ["MsBrainAgingSpatialDonor_13_0","MsBrainAgingSpatialDonor_9_0","MsBrainAgingSpatialDonor_14_0","MsBrainAgingSpatialDonor_1_0"], # allen
-        # [], # androvic
-        # ['CNTRL_PEAK_B_R1', 'EAE_PEAK_B_R1'], # kukanja
-        # ["Middle2"], # pilot
-    ]
-
     exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
     run = wandb.init(
         project="spatial-gnn",

@@ -1,0 +1,51 @@
+{
+    "aging_coronal": {
+        "train_ids": ["1","101","14","19","30","38","42","46","53","61","7","70","75","80","86","97"],
+        "test_ids": ["11","33","57","93"]
+    },
+    "aging_sagittal": {
+        "train_ids": ["2","34","39","62","68"],
+        "test_ids": ["81"]
+    },
+    "exercise": {
+        "train_ids": ["YC1","YC2","YC3","OE1","OE2","OE3","OC1","OC2","OC3"],
+        "test_ids": ["YC4","OE4","OC4"]
+    },
+    "reprogramming": {
+        "train_ids": ["YC1982","YC1990","YC1975","OT902","OT1160","OT1084","OC903","OC1226","OC1083"],
+        "test_ids": ["YC1989","OT1125","OC1138"]
+    },
+    "allen": {
+        "train_ids": [
+            "MsBrainAgingSpatialDonor_10_0", "MsBrainAgingSpatialDonor_10_1", "MsBrainAgingSpatialDonor_10_2",
+            "MsBrainAgingSpatialDonor_11_0", "MsBrainAgingSpatialDonor_11_1", "MsBrainAgingSpatialDonor_11_2",
+            "MsBrainAgingSpatialDonor_12_0", "MsBrainAgingSpatialDonor_12_1", "MsBrainAgingSpatialDonor_13_1",
+            "MsBrainAgingSpatialDonor_13_2", "MsBrainAgingSpatialDonor_14_1", "MsBrainAgingSpatialDonor_15_0",
+            "MsBrainAgingSpatialDonor_15_1", "MsBrainAgingSpatialDonor_16_0", "MsBrainAgingSpatialDonor_16_1",
+            "MsBrainAgingSpatialDonor_17_0", "MsBrainAgingSpatialDonor_17_1", "MsBrainAgingSpatialDonor_18_0",
+            "MsBrainAgingSpatialDonor_18_1", "MsBrainAgingSpatialDonor_19_0", "MsBrainAgingSpatialDonor_19_1",
+            "MsBrainAgingSpatialDonor_19_2", "MsBrainAgingSpatialDonor_2_0", "MsBrainAgingSpatialDonor_2_1",
+            "MsBrainAgingSpatialDonor_3_0", "MsBrainAgingSpatialDonor_3_1", "MsBrainAgingSpatialDonor_4_0",
+            "MsBrainAgingSpatialDonor_4_1", "MsBrainAgingSpatialDonor_4_2", "MsBrainAgingSpatialDonor_5_0",
+            "MsBrainAgingSpatialDonor_5_1", "MsBrainAgingSpatialDonor_5_2", "MsBrainAgingSpatialDonor_6_0",
+            "MsBrainAgingSpatialDonor_6_1", "MsBrainAgingSpatialDonor_6_2", "MsBrainAgingSpatialDonor_7_0",
+            "MsBrainAgingSpatialDonor_7_1", "MsBrainAgingSpatialDonor_7_2", "MsBrainAgingSpatialDonor_8_0",
+            "MsBrainAgingSpatialDonor_8_1", "MsBrainAgingSpatialDonor_8_2", "MsBrainAgingSpatialDonor_9_1",
+            "MsBrainAgingSpatialDonor_9_2"
+        ],
+        "test_ids": [
+            "MsBrainAgingSpatialDonor_13_0",
+            "MsBrainAgingSpatialDonor_9_0",
+            "MsBrainAgingSpatialDonor_14_0",
+            "MsBrainAgingSpatialDonor_1_0"
+        ]
+    },
+    "kukanja": {
+        "train_ids": ["CNTRL_PEAK_B_R2", "CNTRL_PEAK_B_R3", "CNTRL_PEAK_B_R4", "EAE_PEAK_B_R2", "EAE_PEAK_B_R3", "EAE_PEAK_B_R4"],
+        "test_ids": ["CNTRL_PEAK_B_R1", "EAE_PEAK_B_R1"]
+    },
+    "pilot": {
+        "train_ids": ["Middle1", "Old1", "Old2", "Young1", "Young2"],
+        "test_ids": ["Middle2"]
+    }
+} 
