@@ -44,6 +44,7 @@ def main():
     # set up arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
+    parser.add_argument("base_path", help="Base path to the data directory", type=str)
     parser.add_argument("k_hop", help="k-hop neighborhood size", type=int)
     parser.add_argument("augment_hop", help="number of hops to take for graph augmentation", type=int)
     parser.add_argument("center_celltypes", help="cell type labels to center graphs on, separated by comma", type=str)
@@ -65,6 +66,7 @@ def main():
     dataset_config = DATASET_CONFIGS[args.dataset]
     train_ids = dataset_config['train_ids']
     test_ids = dataset_config['test_ids']
+    file_path = os.path.join(args.base_path, dataset_config['file_name'])
     k_hop = args.k_hop
     augment_hop = args.augment_hop
     center_celltypes = args.center_celltypes.split(",")
@@ -100,7 +102,8 @@ def main():
                                             inject_feature=inject_feature,
                                             num_cells_per_ct_id=100,
                                             center_celltypes=center_celltypes,
-                                    use_ids=train_ids)
+                                            use_ids=train_ids,
+                                            file_path=file_path)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         target="expression",
@@ -110,7 +113,8 @@ def main():
                                         inject_feature=inject_feature,
                                         num_cells_per_ct_id=100,
                                         center_celltypes=center_celltypes,
-                                    use_ids=test_ids)
+                                        use_ids=test_ids,
+                                        file_path=file_path)
                                             
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
