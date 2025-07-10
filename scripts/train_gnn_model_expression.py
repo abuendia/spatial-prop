@@ -112,6 +112,8 @@ def main():
             raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
 
     # init dataset with settings
+    raw_filepaths = [file_path]
+
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
                                             target="expression",
                                             k_hop=k_hop,
@@ -121,7 +123,7 @@ def main():
                                             num_cells_per_ct_id=100,
                                             center_celltypes=center_celltypes,
                                             use_ids=train_ids,
-                                            file_path=file_path,
+                                            raw_filepaths=raw_filepaths,
                                             gene_list=gene_list)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
@@ -133,7 +135,7 @@ def main():
                                         num_cells_per_ct_id=100,
                                         center_celltypes=center_celltypes,
                                         use_ids=test_ids,
-                                        file_path=file_path,
+                                        raw_filepaths=raw_filepaths,
                                         gene_list=gene_list)
                                             
     test_dataset.process()
