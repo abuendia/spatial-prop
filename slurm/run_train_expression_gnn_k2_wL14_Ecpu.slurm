@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J k2_wL14_Ecpu # job name
 #SBATCH -N 1
-#SBATCH -n 1
+#SBATCH -n 8
 #SBATCH -t 2880 # Runtime in minutes 
 #SBATCH -p jamesz # Partition to submit to 
 #SBATCH --account=jamesz
@@ -11,6 +11,5 @@
 #SBATCH -e k2_wL14_Ecpu_%A.err # Standard err goes to this filehostname 
 
 source activate merfish_gnn
-python steering_perturbation.py batch_steer_cell 10 test none
-#python steering_perturbation.py batch_steer_cell 10 train none
-source deactivate
+python scripts/train_gnn_model_expression.py --dataset aging_coronal --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 10
+conda deactivate

@@ -1,3 +1,5 @@
+use_wandb = False
+
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -26,7 +28,8 @@ from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
 from torch.nn.modules.loss import _Loss
-import wandb    
+if use_wandb is True:
+    import wandb    
 
 from aging_gnn_model import *
 
@@ -76,7 +79,8 @@ def evaluate(model, test_loader, device="cuda"):
     print("\nEvaluation Results (Correlation by Cell Type):")
     for cell_type, metrics in correlation_results.items():
         print(f"{cell_type}: Pearson={metrics['Pearson']:.4f}, Spearman={metrics['Spearman']:.4f}, R2={metrics['R2']:.4f}")
-        wandb.log({f"barplot_{cell_type}": wandb.plots.bar({"Pearson": metrics['Pearson'], "Spearman": metrics['Spearman'], "R2": metrics['R2']})})
+        if use_wandb is True:
+            wandb.log({f"barplot_{cell_type}": wandb.plots.bar({"Pearson": metrics['Pearson'], "Spearman": metrics['Spearman'], "R2": metrics['R2']})})
 
     return correlation_results  # Return results as a dictionary for further analysis
 
@@ -132,10 +136,11 @@ def main():
     ]
 
     exp_name = f"eval_{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}"
-    run = wandb.init(
-        project="spatial-gnn",
-        name=exp_name,
-    )
+    if use_wandb is True:
+        run = wandb.init(
+            project="spatial-gnn",
+            name=exp_name,
+        )
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         target="expression",

@@ -171,3 +171,8 @@ cython_debug/
 .pypirc
 data/
 results/
+<<<<<<< Updated upstream
+=======
+*.err
+*.out
+>>>>>>> Stashed changes

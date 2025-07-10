@@ -1,13 +1,14 @@
 #!/bin/bash
-#SBATCH -n 1 # Number of cores requested 
-#SBATCH -J steerinjury # job name
-#SBATCH -N 1 # Ensure that all cores are on one machine 
-#SBATCH -t 3600 # Runtime in minutes 
-#SBATCH -p batch # Partition to submit to 
-#SBATCH --account=abrunet1
-#SBATCH --mem=128G # Memory per cpu in MB (see also --mem-per-cpu) 
-#SBATCH -o steerinjury_%A.out # Standard out goes to this file 
-#SBATCH -e steerinjury_%A.err # Standard err goes to this filehostname 
+#SBATCH -J k2_wL14_Ecpu # job name
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 2880 # Runtime in minutes 
+#SBATCH -p jamesz # Partition to submit to 
+#SBATCH --account=jamesz
+#SBATCH --nodelist=sh03-10n67,sh03-10n68
+#SBATCH --mem=100G # Memory per cpu in MB (see also --mem-per-cpu) 
+#SBATCH -o k2_wL14_Ecpu_%A.out # Standard out goes to this file 
+#SBATCH -e k2_wL14_Ecpu_%A.err # Standard err goes to this filehostname 
 
 source activate merfish_gnn
 python steering_perturbation.py batch_steer_cell 10 test injury
