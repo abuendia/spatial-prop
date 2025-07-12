@@ -11,5 +11,5 @@
 #SBATCH -e k2_wL14_Ecpu_%A.err # Standard err goes to this filehostname 
 
 source activate merfish_gnn
-python scripts/train_gnn_model_expression.py --dataset aging_coronal --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+python scripts/train_gnn_model_expression.py --dataset lohoff --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "all" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
 conda deactivate

@@ -116,6 +116,12 @@ def main():
         except FileNotFoundError:
             raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
 
+    # Build cell type index
+    celltypes_to_index = {}
+    for ci, cellt in enumerate(dataset_config["celltypes"]):
+        celltypes_to_index[cellt] = ci
+    
+    
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
                                             target="expression",
@@ -127,7 +133,8 @@ def main():
                                             center_celltypes=center_celltypes,
                                             use_ids=train_ids,
                                             raw_filepaths=[file_path],
-                                            gene_list=gene_list)
+                                            gene_list=gene_list,
+                                            celltypes_to_index=celltypes_to_index)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         target="expression",
@@ -139,7 +146,8 @@ def main():
                                         center_celltypes=center_celltypes,
                                         use_ids=test_ids,
                                         raw_filepaths=[file_path],
-                                        gene_list=gene_list)
+                                        gene_list=gene_list,
+                                        celltypes_to_index=celltypes_to_index)
                                             
     test_dataset.process()
     print("Finished processing test dataset", flush=True)

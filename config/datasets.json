@@ -2,22 +2,26 @@
     "aging_coronal": {
         "train_ids": ["1","101","14","19","30","38","42","46","53","61","7","70","75","80","86","97"],
         "test_ids": ["11","33","57","93"],
-        "file_name": "aging_coronal.h5ad"
+        "file_name": "aging_coronal.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "aging_sagittal": {
         "train_ids": ["2","34","39","62","68"],
         "test_ids": ["81"],
-        "file_name": "aging_sagittal.h5ad"
+        "file_name": "aging_sagittal.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "exercise": {
         "train_ids": ["YC1","YC2","YC3","OE1","OE2","OE3","OC1","OC2","OC3"],
         "test_ids": ["YC4","OE4","OC4"],
-        "file_name": "exercise.h5ad"
+        "file_name": "exercise.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "reprogramming": {
         "train_ids": ["YC1982","YC1990","YC1975","OT902","OT1160","OT1084","OC903","OC1226","OC1083"],
         "test_ids": ["YC1989","OT1125","OC1138"],
-        "file_name": "reprogramming.h5ad"
+        "file_name": "reprogramming.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "allen": {
         "train_ids": [
@@ -43,16 +47,38 @@
             "MsBrainAgingSpatialDonor_14_0",
             "MsBrainAgingSpatialDonor_1_0"
         ],
-        "file_name": "allen_aging_lps_spatialsmooth_spage.h5ad"
+        "file_name": "allen_aging_lps_spatialsmooth_spage.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "kukanja": {
         "train_ids": ["CNTRL_PEAK_B_R2", "CNTRL_PEAK_B_R3", "CNTRL_PEAK_B_R4", "EAE_PEAK_B_R2", "EAE_PEAK_B_R3", "EAE_PEAK_B_R4"],
         "test_ids": ["CNTRL_PEAK_B_R1", "EAE_PEAK_B_R1"],
-        "file_name": "kukanja_ISSMS_spatialsmooth_spage.h5ad"
+        "file_name": "kukanja_ISSMS_spatialsmooth_spage.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
     },
     "pilot": {
         "train_ids": ["Middle1", "Old1", "Old2", "Young1", "Young2"],
         "test_ids": ["Middle2"],
-        "file_name": "pilotraw_merfish_spatialsmooth_spage.h5ad"
+        "file_name": "pilotraw_merfish_spatialsmooth_spage.h5ad",
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
+    },
+    "liverperturb": {
+        "train_ids": ["0_0","0_1","1_0","1_1","2_0","2_1","4_0","4_1","8_0","8_1","8_2","8_3"],
+        "test_ids": ["9_0","9_1"],
+        "file_name": "RNA_scaled_crispr_screen_labeled_FINALsubset.h5ad",
+        "celltypes": ["B cell","Endo","Fibro","Hep","Kuppfer","Monocyte","NK cell","Stromal","T cell"]
+    },
+    "lohoff": {
+        "train_ids": ["train"],
+        "test_ids": ["test"],
+        "file_name": "seqfish_membryo_lohoff.h5ad",
+        "celltypes": ["Allantois", "Anterior somitic tissues", "Cardiomyocytes",
+                       "Cranial mesoderm", "Definitive endoderm", "Dermomyotome",
+                       "Endothelium", "Erythroid", "Forebrain/Midbrain/Hindbrain",
+                       "Gut tube", "Haematoendothelial progenitors",
+                       "Intermediate mesoderm", "Lateral plate mesoderm", "Low quality",
+                       "Mixed mesenchymal mesoderm", "NMP", "Neural crest",
+                       "Presomitic mesoderm", "Sclerotome", "Spinal cord",
+                       "Splanchnic mesoderm", "Surface ectoderm"]
     }
 } 
