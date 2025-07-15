@@ -136,6 +136,7 @@ def main():
     
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
+                                            dataset_prefix=args.dataset,
                                             target="expression",
                                             k_hop=k_hop,
                                             augment_hop=augment_hop,
@@ -149,6 +150,7 @@ def main():
                                             celltypes_to_index=celltypes_to_index)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
+                                        dataset_prefix=args.dataset,
                                         target="expression",
                                         k_hop=k_hop,
                                         augment_hop=augment_hop,
