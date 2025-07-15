@@ -67,7 +67,8 @@ class SpatialAgingCellDataset(Dataset):
         celltypes_to_index [dict] - dictionary mapping cell type labels to integer index
     '''
     def __init__(self, 
-                 root=".", 
+                 root=".",
+                 dataset_prefix="",
                  transform=None, 
                  pre_transform=None,
                  raw_filepaths=None,
@@ -109,6 +110,7 @@ class SpatialAgingCellDataset(Dataset):
                 ):
     
         self.root=root
+        self.dataset_prefix=dataset_prefix
         self.transform=transform
         self.pre_transform=pre_transform
         self.raw_filepaths=raw_filepaths
@@ -140,7 +142,7 @@ class SpatialAgingCellDataset(Dataset):
         else:
             aug_key = int(self.augment_cutoff*100)
         celltype_firstletters = "".join([x[0] for x in self.center_celltypes])
-        data_dir = f"{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
