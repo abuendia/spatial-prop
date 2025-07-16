@@ -14,8 +14,24 @@ source activate merfish_gnn
 
 python scripts/model_performance.py --dataset aging_coronal --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
 
-python scripts/model_performance.py --dataset liverperturb --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NK cell,B cell" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+python scripts/model_performance.py --dataset aging_sagittal --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset allen --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,Macrophage,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset androvic --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,Macrophage,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset exercise --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset kukanja --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,Macrophage,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
 
 python scripts/model_performance.py --dataset lohoff --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "all" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset liverperturb --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NK cell,B cell" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset pilot --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "T cell,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset reprogramming --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "Macrophage,NSC,Pericyte" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
+
+python scripts/model_performance.py --dataset zeng --base_path data/anndata --k_hop 2 --augment_hop 2 --center_celltypes "VSMC,Microglia" --node_feature "expression" --inject_feature "none" --learning_rate 0.0001 --loss "weightedl1" --epochs 50
 
 conda deactivate

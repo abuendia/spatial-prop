@@ -150,7 +150,7 @@ def main():
                                         raw_filepaths=[file_path],
                                         gene_list=gene_list,
                                         celltypes_to_index=celltypes_to_index)
-                                            
+    
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
     train_dataset.process()

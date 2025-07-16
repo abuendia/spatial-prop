@@ -209,8 +209,10 @@ class SpatialAgingCellDataset(Dataset):
                 sub_ids_arr = np.unique(adata.obs[self.sub_id])
             elif self.use_ids[rfi] is None:
                 sub_ids_arr = np.unique(adata.obs[self.sub_id])
-            else:
+            elif isinstance(self.use_ids[rfi], list):
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
+            else:
+                sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids))
             
             for sid in sub_ids_arr:
 

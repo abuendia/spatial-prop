@@ -65,6 +65,11 @@ def main():
     parser.add_argument("--train_or_test", help="train or test dataset", type=str)
     
     args = parser.parse_args()
+    
+    steering_approach = args.steering_approach
+    num_props = args.num_props
+    props = np.linspace(0,1,num_props+1) # proportions to scale
+    train_or_test = args.train_or_test
 
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
@@ -380,7 +385,7 @@ def main():
         plt.setp(ax.get_legend().get_texts(), fontsize='14')
         plt.setp(ax.get_legend().get_title(), fontsize='16')
         plt.tight_layout()
-        plt.savefig(f"{savename}_actualtarget_density.pdf", bbox_inches='tight')
+        plt.savefig(os.path.join(save_dir, f"{savename}_actualtarget_{value}_density.pdf"), bbox_inches='tight')
         plt.close()
         
         # plot line with confidence interval
@@ -396,7 +401,7 @@ def main():
             l = ax.get_ylabel()
             ax.set_ylabel(l, fontsize=16)
         plt.tight_layout()
-        plt.savefig(f"{savename}_actualtarget.pdf", bbox_inches='tight')
+        plt.savefig(os.path.join(save_dir, f"{savename}_actualtarget_{value}.pdf"), bbox_inches='tight')
         plt.close()
     
     print("Finished actualtarget steering...", flush=True)
@@ -487,7 +492,7 @@ def main():
             plt.setp(ax.get_legend().get_texts(), fontsize='14')
             plt.setp(ax.get_legend().get_title(), fontsize='16')
             plt.tight_layout()
-            plt.savefig(f"{savename}_predictedtarget_density.pdf", bbox_inches='tight')
+            plt.savefig(os.path.join(save_dir, f"{savename}_predictedtarget_{value}_density.pdf"), bbox_inches='tight')
             plt.close()
             
             # plot line with confidence interval
@@ -503,7 +508,7 @@ def main():
                 l = ax.get_ylabel()
                 ax.set_ylabel(l, fontsize=16)
             plt.tight_layout()
-            plt.savefig(f"{savename}_predictedtarget.pdf", bbox_inches='tight')
+            plt.savefig(os.path.join(save_dir, f"{savename}_predictedtarget_{value}.pdf"), bbox_inches='tight')
             plt.close()
     
     print("DONE.", flush=True)
