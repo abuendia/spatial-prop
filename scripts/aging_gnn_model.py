@@ -48,6 +48,7 @@ class SpatialAgingCellDataset(Dataset):
         root [str] - root directory path
         transform [None] - not implemented
         pre_transform [None] - not implemented
+        normalize_total [bool] - whether or not to normalize gene expression data to total (don't use for scaled expression inputs)
         raw_filepaths [lst of str] - list of paths to anndata .h5ad files of spatial transcriptomics data
         gene_list [str or None] - path to file containing list of genes to use, or None to compute from AnnData
         processed_folder_name [str] - path to save processed data files
@@ -71,6 +72,7 @@ class SpatialAgingCellDataset(Dataset):
                  dataset_prefix="",
                  transform=None, 
                  pre_transform=None,
+                 normalize_total=True,
                  raw_filepaths=None,
                  gene_list=None,
                  processed_folder_name="data/gnn_datasets",
@@ -113,6 +115,7 @@ class SpatialAgingCellDataset(Dataset):
         self.dataset_prefix=dataset_prefix
         self.transform=transform
         self.pre_transform=pre_transform
+        self.normalize_total=normalize_total
         self.raw_filepaths=raw_filepaths
         self.gene_list = gene_list
         self.processed_folder_name=processed_folder_name
@@ -186,7 +189,8 @@ class SpatialAgingCellDataset(Dataset):
             adata = adata[adata.obs.celltype.isin(self.celltypes_to_index.keys())]
             
             # normalize by total genes
-            sc.pp.normalize_total(adata, target_sum=adata.shape[1])
+            if self.normalize_total is True:
+                sc.pp.normalize_total(adata, target_sum=adata.shape[1])
             
             # handle missing genes (-1 token, indicators added later)
             missing_genes = [gene for gene in gene_names if gene not in adata.var_names]

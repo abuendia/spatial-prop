@@ -58,6 +58,7 @@ def main():
     parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
+    parser.add_argument("--normalize_total", help="Whether to call sc.pp.normalize_total()", type=bool, default=True)
     args = parser.parse_args()
 
     # Load dataset configurations
@@ -115,7 +116,9 @@ def main():
                 gene_list = [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
             raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
-
+    
+    normalize_total = args.normalize_total
+    
     # Build cell type index
     celltypes_to_index = {}
     for ci, cellt in enumerate(dataset_config["celltypes"]):
@@ -135,7 +138,8 @@ def main():
                                             use_ids=train_ids,
                                             raw_filepaths=[file_path],
                                             gene_list=gene_list,
-                                            celltypes_to_index=celltypes_to_index)
+                                            celltypes_to_index=celltypes_to_index,
+                                            normalize_total=normalize_total)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         dataset_prefix=args.dataset,
@@ -149,7 +153,8 @@ def main():
                                         use_ids=test_ids,
                                         raw_filepaths=[file_path],
                                         gene_list=gene_list,
-                                        celltypes_to_index=celltypes_to_index)
+                                        celltypes_to_index=celltypes_to_index,
+                                        normalize_total=normalize_total)
     
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
