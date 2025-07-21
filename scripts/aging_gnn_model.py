@@ -190,6 +190,7 @@ class SpatialAgingCellDataset(Dataset):
             
             # normalize by total genes
             if self.normalize_total is True:
+                print("Normalized data")
                 sc.pp.normalize_total(adata, target_sum=adata.shape[1])
             
             # handle missing genes (-1 token, indicators added later)

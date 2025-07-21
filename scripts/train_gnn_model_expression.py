@@ -58,7 +58,9 @@ def main():
     parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
-    parser.add_argument("--normalize_total", help="Whether to call sc.pp.normalize_total()", type=bool, default=True)
+    parser.add_argument("--normalize_total", action='store_true')
+    parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
+    parser.set_defaults(normalize_total=True)
     args = parser.parse_args()
 
     # Load dataset configurations
