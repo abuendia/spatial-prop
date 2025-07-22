@@ -326,20 +326,25 @@ def main():
         gene_rmse = []
 
         for g in range(preds.shape[1]):
-
-            r, p = pearsonr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
+            
+            if len(preds[celltypes==ct,g]) > 1:
+                r, p = pearsonr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
+                s, p = spearmanr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
+                r2 = r2_score(actuals[celltypes==ct,g], preds[celltypes==ct,g])
+                gene_mae.append(np.mean(np.abs(preds[celltypes==ct,g]-actuals[celltypes==ct,g])))
+                gene_rmse.append(np.sqrt(np.mean((preds[celltypes==ct,g]-actuals[celltypes==ct,g])**2)))
+            else:
+                r = np.nan
+                s = np.nan
+                r2 = np.nan
+                gene_mae.append(np.nan)
+                gene_rmse.append(np.nan)
+                
             gene_r.append(r)
-
-            s, p = spearmanr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
             gene_s.append(s)
-
-            r2 = r2_score(actuals[celltypes==ct,g], preds[celltypes==ct,g])
             gene_r2.append(r2)
 
-            gene_mae.append(np.mean(np.abs(preds[celltypes==ct,g]-actuals[celltypes==ct,g])))
-            gene_rmse.append(np.sqrt(np.mean((preds[celltypes==ct,g]-actuals[celltypes==ct,g])**2)))
-
-
+        
         # cell stats
         cell_r = []
         cell_s = []
@@ -348,39 +353,44 @@ def main():
         cell_rmse = []
 
         for c in np.where(celltypes==ct)[0]:
-
-            r, p = pearsonr(preds[c,:], actuals[c,:])
+            
+            if len(preds[c,:]) > 1:
+                r, p = pearsonr(preds[c,:], actuals[c,:])
+                s, p = spearmanr(preds[c,:], actuals[c,:])
+                r2 = r2_score(actuals[c,:], preds[c,:])
+                cell_mae.append(np.mean(np.abs(preds[c,:]-actuals[c,:])))
+                cell_rmse.append(np.sqrt(np.mean((preds[c,:]-actuals[c,:])**2)))
+            else:
+                r = np.nan
+                s = np.nan
+                r2 = np.nan
+                gene_mae.append(np.nan)
+                gene_rmse.append(np.nan)
+            
             cell_r.append(r)
-
-            s, p = spearmanr(preds[c,:], actuals[c,:])
             cell_s.append(s)
-
-            r2 = r2_score(actuals[c,:], preds[c,:])
             cell_r2.append(r2)
 
-            cell_mae.append(np.mean(np.abs(preds[c,:]-actuals[c,:])))
-            cell_rmse.append(np.sqrt(np.mean((preds[c,:]-actuals[c,:])**2)))
-
-            pred_ct = celltypes==ct
+            #pred_ct = celltypes==ct
             
         # add results to dictionary
-        ct_stats_dict[ct]["Gene - Pearson (mean)"] = np.mean(gene_r)
-        ct_stats_dict[ct]["Gene - Pearson (median)"] = np.median(gene_r)
-        ct_stats_dict[ct]["Gene - Spearman (mean)"] = np.mean(gene_s)
-        ct_stats_dict[ct]["Gene - Spearman (median)"] = np.mean(gene_s)
-        ct_stats_dict[ct]["Gene - R2 (mean)"] = np.mean(gene_r2)
-        ct_stats_dict[ct]["Gene - R2 (median)"] = np.mean(gene_r2)
-        ct_stats_dict[ct]["Gene - MAE (mean)"] = np.mean(gene_mae)
-        ct_stats_dict[ct]["Gene - RMSE (mean)"] = np.mean(gene_rmse)
+        ct_stats_dict[ct]["Gene - Pearson (mean)"] = robust_nanmean(gene_r) 
+        ct_stats_dict[ct]["Gene - Pearson (median)"] = robust_nanmedian(gene_r)
+        ct_stats_dict[ct]["Gene - Spearman (mean)"] = robust_nanmean(gene_s)
+        ct_stats_dict[ct]["Gene - Spearman (median)"] = robust_nanmedian(gene_s)
+        ct_stats_dict[ct]["Gene - R2 (mean)"] = robust_nanmean(gene_r2)
+        ct_stats_dict[ct]["Gene - R2 (median)"] = robust_nanmedian(gene_r2)
+        ct_stats_dict[ct]["Gene - MAE (mean)"] = robust_nanmean(gene_mae)
+        ct_stats_dict[ct]["Gene - RMSE (mean)"] = robust_nanmean(gene_rmse)
         
-        ct_stats_dict[ct]["Cell - Pearson (mean)"] = np.mean(cell_r)
-        ct_stats_dict[ct]["Cell - Pearson (median)"] = np.median(cell_r)
-        ct_stats_dict[ct]["Cell - Spearman (mean)"] = np.mean(cell_s)
-        ct_stats_dict[ct]["Cell - Spearman (median)"] = np.mean(cell_s)
-        ct_stats_dict[ct]["Cell - R2 (mean)"] = np.mean(cell_r2)
-        ct_stats_dict[ct]["Cell - R2 (median)"] = np.median(cell_r2)
-        ct_stats_dict[ct]["Cell - MAE (mean)"] = np.mean(cell_mae)
-        ct_stats_dict[ct]["Cell - RMSE (mean)"] = np.mean(cell_rmse)
+        ct_stats_dict[ct]["Cell - Pearson (mean)"] = robust_nanmean(cell_r)
+        ct_stats_dict[ct]["Cell - Pearson (median)"] = robust_nanmedian(cell_r)
+        ct_stats_dict[ct]["Cell - Spearman (mean)"] = robust_nanmean(cell_s)
+        ct_stats_dict[ct]["Cell - Spearman (median)"] = robust_nanmedian(cell_s)
+        ct_stats_dict[ct]["Cell - R2 (mean)"] = robust_nanmean(cell_r2)
+        ct_stats_dict[ct]["Cell - R2 (median)"] = robust_nanmedian(cell_r2)
+        ct_stats_dict[ct]["Cell - MAE (mean)"] = robust_nanmean(cell_mae)
+        ct_stats_dict[ct]["Cell - RMSE (mean)"] = robust_nanmean(cell_rmse)
     
     # save cell type results
     with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'wb') as f:
@@ -469,6 +479,14 @@ def main():
     print("Finished cell type analysis.", flush=True)
     
     print("DONE.", flush=True)
+
+def robust_nanmean (x):
+    nmx = np.nanmean(x) if np.count_nonzero(~np.isnan(x))>1 else np.mean(x)
+    return (nmx)
+
+def robust_nanmedian (x):
+    nmx = np.nanmedian(x) if np.count_nonzero(~np.isnan(x))>1 else np.median(x)
+    return (nmx)
 
 if __name__ == "__main__":
     main()
