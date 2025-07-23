@@ -94,19 +94,25 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
     return (true_perturb_expn)
 	
 
-def perturb_data (data, perturbation, mask=None):
+def perturb_data (data, perturbation, mask=None, method="add"):
     '''
     Makes perturbation given a graph data object, perturbation, and cell mask
         data - torch_geometric input data object corresponding to subgraph for a cell
         perturbation - array of gene perturbations (of length data.x.shape[1])
         mask - boolean array for which cells to perturb (of length data.x.shape[0])
+        method - str specifying how to perturb ("add", "multiply"); default is "add"
     '''
     data_perturbed = data
     if mask is None:
-        data_perturbed.x = data.x + perturbation
+        if method == "add":
+            data_perturbed.x = data.x + perturbation
+        elif method == "multiply":
+            data_perturbed.x = data.x * perturbation
     else:
-        data_perturbed.x[mask,:] = data.x[mask,:] + perturbation
-    
+        if method == "add":
+            data_perturbed.x[mask,:] = data.x[mask,:] + perturbation
+        elif method == "multiply":
+            data_perturbed.x[mask,:] = data.x[mask,:] * perturbation
     return (data_perturbed)
 	
     
@@ -215,3 +221,31 @@ def batch_steering_cell (data, actual, out, center_celltypes, target=None, prop=
             data.x[data.batch==bi,:] = origin_x_perturbed
 
     return (data, target_celltype, target_y, target_out)
+    
+
+### GO INTERACTION MODULES
+def perturb_by_multiplier (data, gene_indices, perturb_celltype=None, prop=1.0):
+    '''
+    Multiplies gene expression by a scalar factor for a set of indices
+    '''
+    data = data.clone()
+
+    # perturb all graphs with same center cell type as first graph
+    for bi in np.unique(data.batch):
+        origin_x = data.x[data.batch==bi,:]
+
+        net_celltypes = data.celltypes[bi]
+        
+        # create multiplication mask (1 or prop for modified genes)
+        perturb_vec = torch.ones(data.x.shape[1])
+        perturb_vec[gene_indices] = prop
+    
+        # get cell mask
+        submask = np.arange(data.x.shape[0])[data.batch==bi]
+        if perturb_celltype is not None:
+            submask = submask[data.celltypes[bi] == perturb_celltype]
+        
+        # make perturbation
+        data = perturb_data (data, perturb_vec, mask=submask, method="multiply")
+
+    return (data)

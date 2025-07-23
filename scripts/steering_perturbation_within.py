@@ -185,8 +185,8 @@ def main():
 
     # create directory to save results
     model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
-    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
-    
+    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname,"steer_within")
+    os.makedirs(save_dir, exist_ok=True)
     
     ### STEERING EXPERIMENTS ###
     
@@ -373,7 +373,7 @@ def main():
         fig, ax = plt.subplots(figsize=(6,4))
         sns.kdeplot(stats_df[stats_df["Type"]=="Perturbed"], x=value, hue="Prop", ax=ax)
         sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-        #plt.title(save_dir.split("/")[-2], fontsize=14)
+        #plt.title(save_dir.split("/")[-3], fontsize=14)
         plt.xticks(rotation=30, ha='right', fontsize=12)
         plt.yticks(fontsize=12)
         for ax in plt.gcf().axes:
@@ -480,7 +480,7 @@ def main():
             fig, ax = plt.subplots(figsize=(6,4))
             sns.kdeplot(stats_df[stats_df["Type"]=="Perturbed"], x=value, hue="Prop", ax=ax)
             sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-            #plt.title(save_dir.split("/")[-2], fontsize=14)
+            #plt.title(save_dir.split("/")[-3], fontsize=14)
             plt.xticks(rotation=30, ha='right', fontsize=12)
             plt.yticks(fontsize=12)
             for ax in plt.gcf().axes:

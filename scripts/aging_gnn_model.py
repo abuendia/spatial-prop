@@ -154,6 +154,22 @@ class SpatialAgingCellDataset(Dataset):
     @property
     def processed_file_names(self):
         return sorted([f for f in os.listdir(self.processed_dir) if f.endswith('.pt')])
+        
+    @property
+    def gene_names(self):
+        if self.gene_list is not None:
+            # Load gene list from file
+            if isinstance(self.gene_list, str):
+                gene_names = np.genfromtxt(self.gene_list, dtype='unicode')
+            elif isinstance(self.gene_list, list):
+                gene_names = np.array(self.gene_list)
+            else:
+                raise Exception ("gene_list argument not recognized")
+        else:
+            # Compute gene list from first AnnData file
+            adata = sc.read_h5ad(self.raw_filepaths[0])
+            gene_names = adata.var_names.values
+        return gene_names
     
     def process(self):
         
@@ -171,13 +187,14 @@ class SpatialAgingCellDataset(Dataset):
             aug_key = int(self.augment_cutoff*100)
             
         # read in genes
-        if self.gene_list is not None:
-            # Load gene list from file
-            gene_names = np.genfromtxt(self.gene_list, dtype='unicode')
+        gene_names = self.gene_names
+        
+        # save genes
+        if self.subfolder_name is not None:
+            genefn = self.processed_dir.split("/")[-2]
         else:
-            # Compute gene list from first AnnData file
-            adata = sc.read_h5ad(self.raw_filepaths[0])
-            gene_names = adata.var_names.values
+            genefn = self.processed_dir.split("/")[-1]
+        pd.DataFrame(gene_names).to_csv(os.path.join(self.root,self.processed_folder_name,"gene_names",f"{genefn}.csv"), header=False, index=False)
         
         for rfi, raw_filepath in enumerate(self.raw_filepaths):
             # load raw data
