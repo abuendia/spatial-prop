@@ -17,6 +17,7 @@ from decimal import Decimal
 import random
 import networkx as nx
 import argparse
+import tqdm
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -163,11 +164,19 @@ def main():
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False) # shuffle=True to reduce bias in batch-wise metric estimates
+    all_train_data = []
+    all_test_data = []
+    for f in tqdm.tqdm(train_dataset.processed_file_names):
+        all_train_data.append(torch.load(os.path.join(train_dataset.processed_dir, f)))
 
-    print(len(train_dataset), flush=True)
-    print(len(test_dataset), flush=True)
+    for f in tqdm.tqdm(test_dataset.processed_file_names):
+        all_test_data.append(torch.load(os.path.join(test_dataset.processed_dir, f)))
+
+    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+
+    print(len(all_train_data), flush=True)
+    print(len(all_test_data), flush=True)
 
 
     # init GNN model
