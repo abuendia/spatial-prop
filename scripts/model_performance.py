@@ -163,10 +163,7 @@ def main():
                                         gene_list=gene_list,
                                         celltypes_to_index=celltypes_to_index)
 
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-
-    print(len(train_dataset), flush=True)
+    test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(test_dataset), flush=True)
 
 
@@ -230,6 +227,7 @@ def main():
     celltypes = []
     
     for data in test_loader:
+        data = data.to(device)
         if inject is False:
             out = model(data.x, data.edge_index, data.batch, None)
         else:
@@ -244,8 +242,8 @@ def main():
         # get cell type
         celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype)))
     
-    preds = np.concatenate([pred.detach().numpy() for pred in preds])
-    actuals = np.concatenate([act.detach().numpy() for act in actuals])
+    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds])
+    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals])
     celltypes = np.array(celltypes)
     
     # drop genes that are missing everywhere

@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
 from torch.nn.modules.loss import _Loss
 from torch.distributions import MultivariateNormal as MVN
+import json
 
 
 # Dataset Class
@@ -109,6 +110,7 @@ class SpatialAgingCellDataset(Dataset):
                                      'T cell' : 16, 
                                      'B cell' : 17,
                                     },
+                 embedding_json=None
                 ):
     
         self.root=root
@@ -134,6 +136,14 @@ class SpatialAgingCellDataset(Dataset):
         self.radius_cutoff=radius_cutoff
         self.celltypes_to_index=celltypes_to_index
         self._indices = None
+        self.embedding_json = embedding_json
+        self.cell_embeddings = None
+        if embedding_json is not None:
+            with open(embedding_json, 'r') as f:
+                self.cell_embeddings = json.load(f)
+            # Convert all embeddings to np.array for efficient stacking
+            for k in self.cell_embeddings:
+                self.cell_embeddings[k] = np.array(self.cell_embeddings[k], dtype=np.float32)
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
@@ -275,6 +285,19 @@ class SpatialAgingCellDataset(Dataset):
                     precomputed_embed = torch.tensor(sub_adata.obsm["spatial"]).float()
                     node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
                 
+                # If using embeddings, build embedding matrix for all cells in sub_adata
+                if self.cell_embeddings is not None:
+                    emb_dim = len(next(iter(self.cell_embeddings.values())))
+                    emb_matrix = np.zeros((sub_adata.shape[0], emb_dim), dtype=np.float32)
+                    for i, cid in enumerate(sub_adata.obs_names):
+                        if cid in self.cell_embeddings:
+                            emb_matrix[i] = self.cell_embeddings[cid]
+                        else:
+                            emb_matrix[i] = np.zeros(emb_dim, dtype=np.float32)
+                    emb_tensor = torch.tensor(emb_matrix).float()
+                else:
+                    emb_tensor = None
+                
                 ### Get Indices of Random Center Cells
                 cell_idxs = []
                 
@@ -333,8 +356,8 @@ class SpatialAgingCellDataset(Dataset):
                                              region = subgraph_region,
                                              age = subgraph_age,
                                              condition = subgraph_cond,
-                                             dataset = raw_filepath,
-                                             inject = injected_labels) 
+                                             inject = injected_labels,
+                                             dataset = raw_filepath) 
 
                         # save object
                         torch.save(subgraph_data,
@@ -654,14 +677,14 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
     for data in loader:  # Iterate in batches over the training dataset.
         
         end = time.time()
-        print(f"Data load time: {end - start}", flush=True)
+        # print(f"Data load time: {end - start}", flush=True)
         
         start = time.time()
         
         data.to(device)
         
         end = time.time()
-        print(f"To cuda time: {end - start}", flush=True)
+        # print(f"To cuda time: {end - start}", flush=True)
         
         start = time.time()
         
@@ -671,14 +694,14 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
             out = model(data.x, data.edge_index, data.batch, data.inject) # Perform a single forward pass.
         
         end = time.time()
-        print(f"Forward pass time: {end - start}", flush=True)
+        # print(f"Forward pass time: {end - start}", flush=True)
         
         start = time.time()
         
         loss = criterion(out, data.y)  # Compute the loss.
         
         end = time.time()
-        print(f"Loss time: {end - start}", flush=True)
+        # print(f"Loss time: {end - start}", flush=True)
         
         start = time.time()
         
@@ -687,11 +710,11 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
         optimizer.zero_grad()  # Clear gradients.
         
         end = time.time()
-        print(f"Backward pass time: {end - start}", flush=True)
+        # print(f"Backward pass time: {end - start}", flush=True)
         
         start = time.time()
         
-        print(data.x.device)
+        # print(data.x.device)
         
 
 def test(model, loader, loss, criterion, inject=False, device="cuda"):
