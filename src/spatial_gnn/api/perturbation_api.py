@@ -1,8 +1,5 @@
 """
 API for spatial GNN perturbation predictions.
-
-This module provides a high-level interface for applying perturbations to spatial transcriptomics data
-and predicting their effects using trained GNN models.
 """
 
 import numpy as np
