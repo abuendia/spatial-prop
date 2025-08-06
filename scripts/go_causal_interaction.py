@@ -214,7 +214,7 @@ def main():
     print("Running GO interactions...", flush=True)
     
     # extract terms from saved interactions
-    terms_list = np.unique([x.split(".")[0].split("_")[-1] for x in os.listdir(pairs_path)])
+    terms_list = np.unique([("_").join(x.split(".")[0].split("_")[1:]) for x in os.listdir(pairs_path)])
     
     for term in terms_list:
     
@@ -270,7 +270,6 @@ def main():
                     raise Exception("perturb_approach not recognized")
 
                 # append target expression and prop
-                center_celltypes_list.append(celltypes)
                 perturb_props.append(round(prop,3))
 
                 # get perturbed predicted
@@ -285,20 +284,27 @@ def main():
                 perturb_forwards = []
                 start_reverses = []
                 perturb_reverses = []
+                celltypes_subbed = []
                 
+                # collect the center cell start and perturbed expression pairs
                 for bi in np.unique(fdata.batch):
-                    # measure forward perturb w/ response genes
-                    start_forwards.append(torch.sum(actual[bi,response_indices]).detach().numpy())
-                    perturb_forwards.append(torch.sum(fperturbed[bi,response_indices]).detach().numpy())
-                    # measure reverse perturb w/ production genes
-                    start_reverses.append(torch.sum(actual[bi,production_indices]).detach().numpy())
-                    perturb_reverses.append(torch.sum(rperturbed[bi,production_indices]).detach().numpy())
+                    # drop any graphs with starting zero expression for production/response
+                    if (torch.sum(actual[bi,response_indices]) != 0) and (torch.sum(actual[bi,production_indices]) != 0):
+                        # measure forward perturb w/ response genes
+                        start_forwards.append(torch.sum(actual[bi,response_indices]).detach().numpy())
+                        perturb_forwards.append(torch.sum(fperturbed[bi,response_indices]).detach().numpy())
+                        # measure reverse perturb w/ production genes
+                        start_reverses.append(torch.sum(actual[bi,production_indices]).detach().numpy())
+                        perturb_reverses.append(torch.sum(rperturbed[bi,production_indices]).detach().numpy())
+                        # also filter celltypes
+                        celltypes_subbed.append(celltypes[bi])
 
                 # append results and metadata
                 start_forwards_list.append(np.array(start_forwards).flatten())
                 perturb_forwards_list.append(np.array(perturb_forwards).flatten())
                 start_reverses_list.append(np.array(start_reverses).flatten())
                 perturb_reverses_list.append(np.array(perturb_reverses).flatten())
+                center_celltypes_list.append(np.array(celltypes_subbed).flatten())
             
             print(f"Finished {round(prop,3)} proportion", flush=True)
             
