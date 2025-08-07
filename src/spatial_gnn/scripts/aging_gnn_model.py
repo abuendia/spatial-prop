@@ -676,6 +676,7 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
         # print(f"To cuda time: {end - start}", flush=True)
         
         start = time.time()
+        breakpoint()
         
         if inject is False:
             out = model(data.x, data.edge_index, data.batch, None)  # Perform a single forward pass.

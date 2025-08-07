@@ -15,7 +15,8 @@ import warnings
 from typing import List, Dict, Union, Optional, Tuple, Any
 import sys
 import os
-import json 
+import json
+import tqdm 
 
 
 from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, GNN
@@ -153,8 +154,8 @@ def predict_perturbation_effects(
     """
     
     # Validate inputs
-    if not isinstance(adata, ad.AnnData):
-        raise TypeError("adata must be an AnnData object")
+    if adata is not None and not isinstance(adata, ad.AnnData):
+        raise TypeError("adata must be an AnnData object or None")
     
     if not isinstance(model_path, str):
         raise TypeError("model_path must be a string")
@@ -214,21 +215,38 @@ def predict_perturbation_effects(
     for ci, cellt in enumerate(dataset_config["celltypes"]):
         celltypes_to_index[cellt] = ci
     
-    # Prepare dataset using the exact same approach as train_gnn_model_expression.py
-    dataset_obj, celltypes_to_index = _prepare_dataset_like_training(
-        dataset, file_path, k_hop, augment_hop, center_celltypes, 
-        node_feature, inject_feature, train_ids, test_ids,
-        gene_list_data, celltypes_to_index, normalize_total
-    )
+    # Two modes: either use provided AnnData or load from training pipeline
+    if adata is not None:
+        # Mode 1: User provided AnnData - create graphs on-the-fly
+        graphs_data, gene_names = _create_graphs_from_adata(
+            adata, k_hop, node_feature, inject_feature, celltypes_to_index, normalize_total
+        )
+        # Load model using a sample from the graphs
+        model = _load_model_from_graphs(model_path, graphs_data[0], device)
+    else:
+        # Mode 2: Use training pipeline approach
+        dataset_obj, celltypes_to_index, test_loader, all_test_data = _prepare_dataset_like_training(
+            dataset, file_path, k_hop, augment_hop, center_celltypes, 
+            node_feature, inject_feature, train_ids, test_ids,
+            gene_list_data, celltypes_to_index, normalize_total
+        )
+        # Load model using the dataset
+        model = _load_model_from_path(model_path, dataset_obj, device)
+        # Use the pre-loaded data
+        graphs_data = all_test_data
+        gene_names = dataset_obj.gene_names
     
-    # Load model using the same approach as model_performance.py
-    model = _load_model_from_path(model_path, dataset_obj, device)
-    
-    # Create a copy of the original data
-    adata_result = adata.copy()
-    
-    # Create dataloader
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    # Create a copy of the original data for results
+    if adata is not None:
+        adata_result = adata.copy()
+        # Create dataloader from graphs
+        dataloader = DataLoader(graphs_data, batch_size=batch_size, shuffle=False)
+    else:
+        # For training pipeline mode, create a dummy adata for results
+        adata_result = ad.AnnData(X=np.zeros((100, len(gene_names))))
+        adata_result.var_names = gene_names
+        # Use the pre-created dataloader
+        dataloader = test_loader
     
     # Initialize storage for results
     all_predictions_original = []
@@ -239,6 +257,8 @@ def predict_perturbation_effects(
     # Process each batch
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(dataloader):
+            batch_data = batch_data.to(device)
+            
             # Get original predictions
             predictions_original = predict(model, batch_data, inject=inject_feature is not None)
             
@@ -270,6 +290,161 @@ def predict_perturbation_effects(
     )
     
     return adata_result
+
+
+def _create_graphs_from_adata(
+    adata: ad.AnnData,
+    k_hop: int,
+    node_feature: str,
+    inject_feature: Optional[str],
+    celltypes_to_index: Dict[str, int],
+    normalize_total: bool
+) -> Tuple[List[Data], List[str]]:
+    """
+    Create graph objects directly from AnnData, similar to how SpatialAgingCellDataset.process() works
+    """
+    from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
+    from scipy.sparse import issparse
+    
+    # Make a copy to avoid modifying the original
+    adata_copy = adata.copy()
+    
+    if issparse(adata_copy.X):
+        adata_copy.X = adata_copy.X.toarray()
+    
+    # Filter to known cell types
+    adata_copy = adata_copy[adata_copy.obs.celltype.isin(celltypes_to_index.keys())]
+    
+    # Normalize by total genes if requested
+    if normalize_total:
+        print("Normalized data")
+        sc.pp.normalize_total(adata_copy, target_sum=adata_copy.shape[1])
+    
+    # Get gene names
+    gene_names = adata_copy.var_names.values
+    
+    # Build spatial graph using Delaunay triangulation
+    build_spatial_graph(adata_copy, method="delaunay")
+    radius_cutoff = 200  # Same as in training
+    adata_copy.obsp['spatial_connectivities'][adata_copy.obsp['spatial_distances'] > radius_cutoff] = 0
+    adata_copy.obsp['spatial_distances'][adata_copy.obsp['spatial_distances'] > radius_cutoff] = 0
+    
+    # Convert to PyG format
+    edge_index, edge_att = from_scipy_sparse_matrix(adata_copy.obsp['spatial_connectivities'])
+    
+    # Construct node labels
+    if node_feature not in ["celltype", "expression", "celltype_expression"]:
+        raise Exception(f"'node_feature' value of {node_feature} not recognized")
+    
+    if "celltype" in node_feature:
+        node_labels = torch.tensor([celltypes_to_index[x] for x in adata_copy.obs["celltype"]])
+        node_labels = one_hot(node_labels, num_classes=len(celltypes_to_index.keys()))
+    
+    if "expression" in node_feature:
+        if node_feature == "expression":
+            node_labels = torch.tensor(adata_copy.X).float()
+        else:
+            node_labels = torch.cat((node_labels, torch.tensor(adata_copy.X).float()), 1).float()
+    
+    # Create graphs for each cell (simplified version - just create a few representative graphs)
+    graphs = []
+    cell_indices = []
+    
+    # Sample some cells to create graphs from (for perturbation analysis)
+    n_cells_to_sample = min(50, adata_copy.shape[0])  # Sample up to 50 cells
+    sampled_indices = np.random.choice(adata_copy.shape[0], n_cells_to_sample, replace=False)
+    
+    for cidx in sampled_indices:
+        # Get k-hop subgraph
+        sub_nodes, sub_edge_index, center_node_id, edge_mask = k_hop_subgraph(
+            int(cidx), k_hop, edge_index, relabel_nodes=True
+        )
+        
+        if len(sub_nodes) > 2 * k_hop:  # Filter out tiny subgraphs
+            # Get node features for subgraph
+            sub_node_labels = node_labels[sub_nodes, :]
+            
+            # Get target (expression of center cell)
+            graph_label = np.array(adata_copy[cidx, :].X).flatten().astype('float32')
+            
+            # Get cell types
+            subgraph_cts = np.array(adata_copy.obs["celltype"].values[sub_nodes.numpy()].copy())
+            subgraph_cct = subgraph_cts[center_node_id.numpy()]
+            
+            # Get injected labels if needed
+            if inject_feature == "center_celltype":
+                injected_labels = one_hot(
+                    torch.tensor([celltypes_to_index[subgraph_cct[0]]]), 
+                    num_classes=len(celltypes_to_index.keys())
+                )
+            
+            # Zero out center cell node features (as in training)
+            sub_node_labels[center_node_id, :] = 0
+            
+            # Create PyG Data object
+            if inject_feature is None:
+                graph_data = Data(
+                    x=sub_node_labels,
+                    edge_index=sub_edge_index,
+                    y=torch.tensor([graph_label]).flatten(),
+                    center_node=center_node_id,
+                    center_celltype=subgraph_cct,
+                    celltypes=subgraph_cts
+                )
+            else:
+                graph_data = Data(
+                    x=sub_node_labels,
+                    edge_index=sub_edge_index,
+                    y=torch.tensor([graph_label]).flatten(),
+                    center_node=center_node_id,
+                    center_celltype=subgraph_cct,
+                    celltypes=subgraph_cts,
+                    inject=injected_labels
+                )
+            
+            graphs.append(graph_data)
+            cell_indices.append(cidx)
+    
+    return graphs, gene_names
+
+
+def _load_model_from_graphs(
+    model_path: str,
+    sample_graph: Data,
+    device: str
+) -> torch.nn.Module:
+    """
+    Load model using a sample graph to determine dimensions
+    """
+    # Determine if injection is used
+    inject = hasattr(sample_graph, 'inject')
+    
+    if inject:
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(sample_graph.x.shape[1]),
+            output_dim=len(sample_graph.y),
+            inject_dim=int(sample_graph.inject.shape[1]),
+            method="GIN",
+            pool="add",
+            num_layers=2  # This should match k_hop from training
+        )
+    else:
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(sample_graph.x.shape[1]),
+            output_dim=len(sample_graph.y),
+            method="GIN",
+            pool="add",
+            num_layers=2  # This should match k_hop from training
+        )
+    
+    # Load the state dictionary
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+    model.to(device)
+    model.eval()
+    
+    return model
 
 
 def _prepare_dataset_like_training(
@@ -326,7 +501,50 @@ def _prepare_dataset_like_training(
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
-    return test_dataset, celltypes_to_index
+    # Apply debug mode subsetting if enabled (copied from train_gnn_model_expression.py)
+    # For perturbation, we can add a debug parameter later if needed
+    debug = True  # Set to False by default for perturbation analysis
+    debug_subset_size = 100  # Default value
+    
+    if debug:
+        print(f"DEBUG MODE: Using subset of {debug_subset_size} samples from each dataset", flush=True)
+        
+        # Subset train dataset
+        train_subset_size = min(debug_subset_size, len(train_dataset))
+        train_dataset._indices = list(range(train_subset_size))
+        
+        # Subset test dataset  
+        test_subset_size = min(debug_subset_size, len(test_dataset))
+        test_dataset._indices = list(range(test_subset_size))
+        
+        print(f"DEBUG: Train dataset subset to {len(train_dataset)} samples", flush=True)
+        print(f"DEBUG: Test dataset subset to {len(test_dataset)} samples", flush=True)
+
+    all_train_data = []
+    all_test_data = []
+    
+    # Get file names to load - use subset if in debug mode (copied from train_gnn_model_expression.py)
+    if debug:
+        train_files = train_dataset.processed_file_names[:train_subset_size]
+        test_files = test_dataset.processed_file_names[:test_subset_size]
+    else:
+        train_files = train_dataset.processed_file_names
+        test_files = test_dataset.processed_file_names
+    
+    for f in tqdm.tqdm(train_files):
+        all_train_data.append(torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False))
+
+    for f in tqdm.tqdm(test_files):
+        all_test_data.append(torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False))
+
+    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+
+    print(len(all_train_data), flush=True)
+    print(len(all_test_data), flush=True)
+
+    # For perturbation analysis, we'll use the test dataset and test_loader
+    return test_dataset, celltypes_to_index, test_loader, all_test_data
 
 
 def _load_model_from_path(
@@ -637,7 +855,7 @@ if __name__ == "__main__":
     # Use the same parameters as the training script
     perturbations = [{'type': 'knockout', 'genes': ['Gm12878'], 'magnitude': 0.0, 'cell_types': ['T cell', 'NSC', 'Pericyte'], 'proportion': 1.0}]
     adata_perturbed = predict_perturbation_effects(
-        adata=adata,
+        adata=adata,  
         model_path=model_path,
         perturbations=perturbations,
         dataset="aging_coronal",
