@@ -10,17 +10,17 @@ from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import k_hop_subgraph, one_hot
 from scipy.sparse import issparse
-import copy
-import warnings
+from torch_geometric.utils.convert import from_scipy_sparse_matrix
 from typing import List, Dict, Union, Optional, Tuple, Any
 import sys
 import os
 import json
 import tqdm 
-
+import matplotlib.pyplot as plt
 
 from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, GNN
 from spatial_gnn.scripts.perturbation import predict, perturb_data, get_center_celltypes, get_center_celltypes
+from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
 
 
 def predict_perturbation_effects(
@@ -34,13 +34,12 @@ def predict_perturbation_effects(
     center_celltypes: str,
     node_feature: str,
     inject_feature: str,
-    learning_rate: float,
-    loss: str,
-    epochs: int,
     gene_list: Optional[str] = None,
     normalize_total: bool = True,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
+    debug: bool = False,
+    debug_subset_size: int = 100,
     **kwargs
 ) -> ad.AnnData:
     """
@@ -91,15 +90,6 @@ def predict_perturbation_effects(
     inject_feature : str
         inject features key, e.g. 'center_celltype'
     
-    learning_rate : float
-        learning rate
-    
-    loss : str
-        loss: balanced_mse, npcc, mse, l1
-    
-    epochs : int
-        number of epochs
-    
     gene_list : Optional[str], default=None
         Path to file containing list of genes to use (optional)
     
@@ -111,6 +101,12 @@ def predict_perturbation_effects(
     
     batch_size : int, default=32
         Batch size for processing
+    
+    debug : bool, default=False
+        Enable debug mode with subset of data for quick testing
+    
+    debug_subset_size : int, default=100
+        Number of cells to use in debug mode
     
     **kwargs
         Additional arguments passed to SpatialAgingCellDataset
@@ -147,9 +143,8 @@ def predict_perturbation_effects(
     ...     center_celltypes="all",
     ...     node_feature="expression",
     ...     inject_feature="None",
-    ...     learning_rate=1e-4,
-    ...     loss="mse",
-    ...     epochs=100
+    ...     debug=True,
+    ...     debug_subset_size=50
     ... )
     """
     
@@ -217,9 +212,23 @@ def predict_perturbation_effects(
     
     # Two modes: either use provided AnnData or load from training pipeline
     if adata is not None:
+        # Apply debug subsetting if enabled
+        if debug:
+            print(f"DEBUG MODE: Subsetting AnnData to {debug_subset_size} cells", flush=True)
+            # Randomly sample cells for faster processing
+            n_cells = min(debug_subset_size, adata.shape[0])
+            sampled_indices = np.random.choice(adata.shape[0], n_cells, replace=False)
+            adata = adata[sampled_indices].copy()
+            # Store original indices for mapping back
+            adata.obs['original_index'] = sampled_indices
+            print(f"DEBUG: AnnData subset to {adata.shape[0]} cells", flush=True)
+        else:
+            # If not in debug mode, just store sequential indices
+            adata.obs['original_index'] = np.arange(adata.shape[0])
+        
         # Mode 1: User provided AnnData - create graphs on-the-fly
-        graphs_data, gene_names = _create_graphs_from_adata(
-            adata, k_hop, node_feature, inject_feature, celltypes_to_index, normalize_total
+        graphs_data, gene_names, cell_type_indices = _create_graphs_from_adata(
+            adata, k_hop, node_feature, inject_feature, celltypes_to_index, normalize_total, debug, debug_subset_size
         )
         # Load model using a sample from the graphs
         model = _load_model_from_graphs(model_path, graphs_data[0], device)
@@ -286,7 +295,7 @@ def predict_perturbation_effects(
     # Map predictions back to original AnnData structure
     _add_predictions_to_adata(
         adata_result, predictions_original, predictions_perturbed, 
-        perturbation_mask, all_cell_indices, dataset.gene_names
+        perturbation_mask, all_cell_indices, gene_names
     )
     
     return adata_result
@@ -298,14 +307,20 @@ def _create_graphs_from_adata(
     node_feature: str,
     inject_feature: Optional[str],
     celltypes_to_index: Dict[str, int],
-    normalize_total: bool
-) -> Tuple[List[Data], List[str]]:
+    normalize_total: bool,
+    debug: bool = False,
+    debug_subset_size: int = 100
+) -> Tuple[List[Data], List[str], np.ndarray]:
     """
     Create graph objects directly from AnnData, similar to how SpatialAgingCellDataset.process() works
-    """
-    from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
-    from scipy.sparse import issparse
     
+    Returns
+    -------
+    Tuple[List[Data], List[str], np.ndarray]
+        - List of graph Data objects
+        - List of gene names
+        - Array of original cell indices (for mapping back to original data)
+    """    
     # Make a copy to avoid modifying the original
     adata_copy = adata.copy()
     
@@ -313,7 +328,9 @@ def _create_graphs_from_adata(
         adata_copy.X = adata_copy.X.toarray()
     
     # Filter to known cell types
-    adata_copy = adata_copy[adata_copy.obs.celltype.isin(celltypes_to_index.keys())]
+    cell_type_mask = adata_copy.obs.celltype.isin(celltypes_to_index.keys())
+    adata_copy = adata_copy[cell_type_mask]
+    original_indices = np.where(cell_type_mask)[0]  # Track indices after cell type filtering
     
     # Normalize by total genes if requested
     if normalize_total:
@@ -350,11 +367,7 @@ def _create_graphs_from_adata(
     graphs = []
     cell_indices = []
     
-    # Sample some cells to create graphs from (for perturbation analysis)
-    n_cells_to_sample = min(50, adata_copy.shape[0])  # Sample up to 50 cells
-    sampled_indices = np.random.choice(adata_copy.shape[0], n_cells_to_sample, replace=False)
-    
-    for cidx in sampled_indices:
+    for cidx in range(adata_copy.shape[0]):
         # Get k-hop subgraph
         sub_nodes, sub_edge_index, center_node_id, edge_mask = k_hop_subgraph(
             int(cidx), k_hop, edge_index, relabel_nodes=True
@@ -683,9 +696,13 @@ def _create_cell_mask(
 
 def _get_cell_indices_from_batch(batch_data: Data, adata: ad.AnnData) -> List[int]:
     """Extract cell indices from batch data."""
-    # This is a simplified implementation
-    # In practice, you'd need to map the batch data back to original cell indices
-    return list(range(batch_data.x.shape[0]))
+    # Get the original indices from the AnnData object
+    if 'original_index' in adata.obs:
+        # Map through both the original_index and cell type filtering
+        return adata.obs['original_index'].astype(int).tolist()
+    else:
+        # Fallback to sequential indices if original_index is not available
+        return list(range(adata.n_obs))
 
 
 def _add_predictions_to_adata(
@@ -706,20 +723,24 @@ def _add_predictions_to_adata(
     # Create perturbation effects (difference)
     perturbation_effects = pred_pert_np - pred_orig_np
     
-    # Add to AnnData layers
-    adata.layers['predicted_original'] = np.zeros_like(adata.X)
-    adata.layers['predicted_perturbed'] = np.zeros_like(adata.X)
-    adata.layers['perturbation_effects'] = np.zeros_like(adata.X)
+    # Initialize layers with zeros for the full size of original data
+    n_cells = max(cell_indices) + 1 if cell_indices else adata.n_obs
+    n_genes = adata.X.shape[1]
     
-    # Map predictions back to original cell order
+    adata.layers['predicted_original'] = np.zeros((n_cells, n_genes))
+    adata.layers['predicted_perturbed'] = np.zeros((n_cells, n_genes))
+    adata.layers['perturbation_effects'] = np.zeros((n_cells, n_genes))
+    adata.obs['perturbation_mask'] = np.zeros(n_cells, dtype=bool)
+    
+    # Map predictions back to original cell order using the tracked indices
     for i, cell_idx in enumerate(cell_indices):
-        if cell_idx < adata.n_obs:
-            adata.layers['predicted_original'][cell_idx, :len(gene_names)] = pred_orig_np[i, :]
-            adata.layers['predicted_perturbed'][cell_idx, :len(gene_names)] = pred_pert_np[i, :]
-            adata.layers['perturbation_effects'][cell_idx, :len(gene_names)] = perturbation_effects[i, :]
-    
-    # Add perturbation mask to obs
-    adata.obs['perturbation_mask'] = pert_mask_np[:adata.n_obs]
+        if i < len(pred_orig_np):  # Check if we have predictions for this index
+            gene_length = min(len(gene_names), n_genes)
+            adata.layers['predicted_original'][cell_idx, :gene_length] = pred_orig_np[i, :gene_length]
+            adata.layers['predicted_perturbed'][cell_idx, :gene_length] = pred_pert_np[i, :gene_length]
+            adata.layers['perturbation_effects'][cell_idx, :gene_length] = perturbation_effects[i, :gene_length]
+            if i < len(pert_mask_np):
+                adata.obs.loc[cell_idx, 'perturbation_mask'] = pert_mask_np[i]
 
 
 def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
@@ -790,8 +811,7 @@ def visualize_perturbation_effects(
         top_indices = np.argsort(mean_effects)[-n_genes:]
         genes = adata.var_names[top_indices].tolist()
     
-    # Create visualization
-    import matplotlib.pyplot as plt
+    
     
     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
     
@@ -865,8 +885,7 @@ if __name__ == "__main__":
         center_celltypes="T cell,NSC,Pericyte",
         node_feature="expression",
         inject_feature="None",
-        learning_rate=1e-4,
-        loss="weightedl1",
-        epochs=10
+        debug=True,
+        debug_subset_size=50
     )
     visualize_perturbation_effects(adata_perturbed)
