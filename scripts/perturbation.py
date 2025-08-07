@@ -53,7 +53,7 @@ def propagate_perturbation (adata, method='distribution', temper=0.05):
     return (adata)
 	
 	
-def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temper=0.05):
+def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renormalize", temper=0.05):
     '''
     Compute the perturbed gene expression given:
         true_expn - array (cell x gene) of true unperturbed expression
@@ -68,7 +68,12 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
         p = p_hat * row_norm.unsqueeze(1)
         return (p)
     
-    if method == "prediction_delta":
+    if method == "none":
+        
+        # pass in raw predictions
+        true_perturb_expn = pred_perturb_expn
+    
+    elif method == "prediction_delta":
         
         # computes effect of perturbation in prediction space
         diff = pred_perturb_expn - pred_expn
