@@ -5,20 +5,8 @@ import scanpy as sc
 import squidpy as sq
 import anndata as ad
 from scipy.stats import pearsonr, spearmanr, ttest_ind
-import pickle
 import os
-from sklearn.neighbors import BallTree
-
-from scipy.stats import mannwhitneyu, ttest_ind
 from scipy.sparse import issparse
-from statsmodels.stats.multitest import multipletests
-from decimal import Decimal
-
-import random
-
-from ageaccel_proximity import *
-
-import networkx as nx
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -32,6 +20,7 @@ from torch.nn.modules.loss import _Loss
 from torch.distributions import MultivariateNormal as MVN
 import json
 
+from spatial_gnn.scripts.ageaccel_proximity import *
 
 # Dataset Class
 

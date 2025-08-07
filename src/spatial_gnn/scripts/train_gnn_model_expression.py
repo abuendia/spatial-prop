@@ -61,6 +61,8 @@ def main():
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     parser.add_argument("--normalize_total", action='store_true')
     parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
+    parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
+    parser.add_argument("--debug_subset_size", type=int, default=100, help="Number of samples to use in debug mode (default: 100)")
     parser.set_defaults(normalize_total=True)
     args = parser.parse_args()
 
@@ -105,6 +107,8 @@ def main():
 
     # train
     exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
+    if args.debug:
+        exp_name = f"DEBUG_{exp_name}"
     if use_wandb is True:
         run = wandb.init(
         project="spatial-gnn",
@@ -164,13 +168,37 @@ def main():
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
+    # Apply debug mode subsetting if enabled
+    if args.debug:
+        print(f"DEBUG MODE: Using subset of {args.debug_subset_size} samples from each dataset", flush=True)
+        
+        # Subset train dataset
+        train_subset_size = min(args.debug_subset_size, len(train_dataset))
+        train_dataset._indices = list(range(train_subset_size))
+        
+        # Subset test dataset  
+        test_subset_size = min(args.debug_subset_size, len(test_dataset))
+        test_dataset._indices = list(range(test_subset_size))
+        
+        print(f"DEBUG: Train dataset subset to {len(train_dataset)} samples", flush=True)
+        print(f"DEBUG: Test dataset subset to {len(test_dataset)} samples", flush=True)
+
     all_train_data = []
     all_test_data = []
-    for f in tqdm.tqdm(train_dataset.processed_file_names):
-        all_train_data.append(torch.load(os.path.join(train_dataset.processed_dir, f)))
+    
+    # Get file names to load - use subset if in debug mode
+    if args.debug:
+        train_files = train_dataset.processed_file_names[:train_subset_size]
+        test_files = test_dataset.processed_file_names[:test_subset_size]
+    else:
+        train_files = train_dataset.processed_file_names
+        test_files = test_dataset.processed_file_names
+    
+    for f in tqdm.tqdm(train_files):
+        all_train_data.append(torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False))
 
-    for f in tqdm.tqdm(test_dataset.processed_file_names):
-        all_test_data.append(torch.load(os.path.join(test_dataset.processed_dir, f)))
+    for f in tqdm.tqdm(test_files):
+        all_test_data.append(torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False))
 
     train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
     test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
@@ -217,6 +245,8 @@ def main():
 
     # create directory to save results
     model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
+    if args.debug:
+        model_dirname = f"DEBUG_{model_dirname}"
     save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)

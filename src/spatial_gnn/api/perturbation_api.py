@@ -1,7 +1,6 @@
 """
 API for spatial GNN perturbation predictions.
 """
-
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -14,24 +13,31 @@ from scipy.sparse import issparse
 import copy
 import warnings
 from typing import List, Dict, Union, Optional, Tuple, Any
-
-# Import from the spatial-gnn codebase
 import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'scripts'))
+import json 
 
-from aging_gnn_model import SpatialAgingCellDataset, GNN
-from perturbation import predict, perturb_data, get_center_celltypes
+
+from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, GNN
+from spatial_gnn.scripts.perturbation import predict, perturb_data, get_center_celltypes, get_center_celltypes
 
 
 def predict_perturbation_effects(
     adata: ad.AnnData,
-    model: torch.nn.Module,
+    model_path: str,
     perturbations: List[Dict[str, Any]],
-    k_hop: int = 2,
-    node_feature: str = "expression",
-    inject_feature: Optional[str] = None,
-    celltypes_to_index: Optional[Dict[str, int]] = None,
+    dataset: str,
+    base_path: str,
+    k_hop: int,
+    augment_hop: int,
+    center_celltypes: str,
+    node_feature: str,
+    inject_feature: str,
+    learning_rate: float,
+    loss: str,
+    epochs: int,
+    gene_list: Optional[str] = None,
+    normalize_total: bool = True,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
     **kwargs
@@ -51,8 +57,8 @@ def predict_perturbation_effects(
         - obsm: spatial coordinates (e.g., 'spatial')
         - var: gene metadata
     
-    model : torch.nn.Module
-        Trained GNN model (should be compatible with the GNN class from aging_gnn_model.py)
+    model_path : str
+        Path to the saved model state dictionary (.pth file)
     
     perturbations : List[Dict[str, Any]]
         List of perturbation specifications. Each perturbation should be a dictionary with:
@@ -63,17 +69,41 @@ def predict_perturbation_effects(
         - 'spatial_region': Optional[Dict], spatial region constraints
         - 'proportion': Optional[float], proportion of cells to perturb (default: 1.0)
     
-    k_hop : int, default=2
-        Number of hops for spatial neighborhood construction
+    dataset : str
+        Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)
     
-    node_feature : str, default="expression"
-        Type of node features to use ("expression", "celltype", "celltype_expression")
+    base_path : str
+        Base path to the data directory
     
-    inject_feature : Optional[str], default=None
-        Feature to inject into the model (e.g., "center_celltype")
+    k_hop : int
+        k-hop neighborhood size
     
-    celltypes_to_index : Optional[Dict[str, int]], default=None
-        Mapping of cell type names to indices. If None, will be inferred from adata.obs
+    augment_hop : int
+        number of hops to take for graph augmentation
+    
+    center_celltypes : str
+        cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering
+    
+    node_feature : str
+        node features key, e.g. 'celltype_age_region'
+    
+    inject_feature : str
+        inject features key, e.g. 'center_celltype'
+    
+    learning_rate : float
+        learning rate
+    
+    loss : str
+        loss: balanced_mse, npcc, mse, l1
+    
+    epochs : int
+        number of epochs
+    
+    gene_list : Optional[str], default=None
+        Path to file containing list of genes to use (optional)
+    
+    normalize_total : bool, default=True
+        Whether to normalize total gene expression
     
     device : str, default="cuda" if available else "cpu"
         Device to run the model on
@@ -107,9 +137,18 @@ def predict_perturbation_effects(
     >>> # Apply perturbations and get predictions
     >>> adata_perturbed = predict_perturbation_effects(
     ...     adata=adata,
-    ...     model=trained_model,
+    ...     model_path="path/to/model.pth",
     ...     perturbations=perturbations,
-    ...     k_hop=2
+    ...     dataset="aging_coronal",
+    ...     base_path="/path/to/data",
+    ...     k_hop=2,
+    ...     augment_hop=2,
+    ...     center_celltypes="all",
+    ...     node_feature="expression",
+    ...     inject_feature="None",
+    ...     learning_rate=1e-4,
+    ...     loss="mse",
+    ...     epochs=100
     ... )
     """
     
@@ -117,38 +156,76 @@ def predict_perturbation_effects(
     if not isinstance(adata, ad.AnnData):
         raise TypeError("adata must be an AnnData object")
     
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError("model must be a PyTorch module")
+    if not isinstance(model_path, str):
+        raise TypeError("model_path must be a string")
     
     if not isinstance(perturbations, list) or len(perturbations) == 0:
         raise ValueError("perturbations must be a non-empty list")
     
-    # Move model to device
-    model = model.to(device)
-    model.eval()
+    # Load dataset configurations - exact same as train_gnn_model_expression.py
+    def load_dataset_config():
+        """Load dataset configurations from JSON file."""
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
+        except json.JSONDecodeError:
+            raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
+
+    DATASET_CONFIGS = load_dataset_config()
+
+    # Validate dataset choice
+    if dataset not in DATASET_CONFIGS:
+        raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
+
+    # load parameters from arguments - exact same as train_gnn_model_expression.py
+    dataset_config = DATASET_CONFIGS[dataset]
+    train_ids = dataset_config['train_ids']
+    test_ids = dataset_config['test_ids']
+    file_path = os.path.join(base_path, dataset_config['file_name'])
+    
+    # Handle center_celltypes - exact same as train_gnn_model_expression.py
+    if center_celltypes.lower() == 'none':
+        center_celltypes = None
+    elif center_celltypes.lower() == 'all':
+        center_celltypes = 'all'
+    else:
+        center_celltypes = center_celltypes.split(",")
+
+    if inject_feature.lower() == "none":
+        inject_feature = None
+        inject=False
+    else:
+        inject=True
+
+    # Load gene list if provided - exact same as train_gnn_model_expression.py
+    gene_list_data = None
+    if gene_list is not None:
+        try:
+            with open(gene_list, 'r') as f:
+                gene_list_data = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Gene list file not found at {gene_list}")
+    
+    # Build cell type index - exact same as train_gnn_model_expression.py
+    celltypes_to_index = {}
+    for ci, cellt in enumerate(dataset_config["celltypes"]):
+        celltypes_to_index[cellt] = ci
+    
+    # Prepare dataset using the exact same approach as train_gnn_model_expression.py
+    dataset_obj, celltypes_to_index = _prepare_dataset_like_training(
+        dataset, file_path, k_hop, augment_hop, center_celltypes, 
+        node_feature, inject_feature, train_ids, test_ids,
+        gene_list_data, celltypes_to_index, normalize_total
+    )
+    
+    # Load model using the same approach as model_performance.py
+    model = _load_model_from_path(model_path, dataset_obj, device)
     
     # Create a copy of the original data
     adata_result = adata.copy()
-    
-    # Infer celltypes_to_index if not provided
-    if celltypes_to_index is None:
-        if 'celltype' in adata.obs.columns:
-            unique_celltypes = sorted(adata.obs['celltype'].unique())
-            celltypes_to_index = {ct: i for i, ct in enumerate(unique_celltypes)}
-        else:
-            warnings.warn("No celltype column found in adata.obs, using default celltypes_to_index")
-            celltypes_to_index = {
-                'Neuron-Excitatory': 0, 'Neuron-Inhibitory': 1, 'Neuron-MSN': 2,
-                'Astrocyte': 3, 'Microglia': 4, 'Oligodendrocyte': 5, 'OPC': 6,
-                'Endothelial': 7, 'Pericyte': 8, 'VSMC': 9, 'VLMC': 10,
-                'Ependymal': 11, 'Neuroblast': 12, 'NSC': 13, 'Macrophage': 14,
-                'Neutrophil': 15, 'T cell': 16, 'B cell': 17
-            }
-    
-    # Prepare dataset for processing
-    dataset = _prepare_dataset(
-        adata, k_hop, node_feature, inject_feature, celltypes_to_index, **kwargs
-    )
     
     # Create dataloader
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -162,8 +239,6 @@ def predict_perturbation_effects(
     # Process each batch
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(dataloader):
-            batch_data = batch_data.to(device)
-            
             # Get original predictions
             predictions_original = predict(model, batch_data, inject=inject_feature is not None)
             
@@ -197,38 +272,101 @@ def predict_perturbation_effects(
     return adata_result
 
 
-def _prepare_dataset(
-    adata: ad.AnnData,
+def _prepare_dataset_like_training(
+    dataset: str,
+    file_path: str,
     k_hop: int,
+    augment_hop: int,
+    center_celltypes: Union[str, List[str], None],
     node_feature: str,
     inject_feature: Optional[str],
+    train_ids: List[str],
+    test_ids: List[str],
+    gene_list: Optional[List[str]],
     celltypes_to_index: Dict[str, int],
-    **kwargs
-) -> SpatialAgingCellDataset:
-    """Prepare dataset for processing."""
+    normalize_total: bool
+) -> Tuple[SpatialAgingCellDataset, Dict[str, int]]:
+    """
+    Prepare dataset using the exact same approach as train_gnn_model_expression.py
+    """
     
-    # Create temporary file path for the dataset
-    temp_filepath = f"temp_adata_{id(adata)}.h5ad"
-    adata.write(temp_filepath)
+    # init dataset with settings - exact copy from train_gnn_model_expression.py
+    train_dataset = SpatialAgingCellDataset(subfolder_name="train",
+                                            dataset_prefix=dataset,
+                                            target="expression",
+                                            k_hop=k_hop,
+                                            augment_hop=augment_hop,
+                                            node_feature=node_feature,
+                                            inject_feature=inject_feature,
+                                            num_cells_per_ct_id=100,
+                                            center_celltypes=center_celltypes,
+                                            use_ids=train_ids,
+                                            raw_filepaths=[file_path],
+                                            gene_list=gene_list,
+                                            celltypes_to_index=celltypes_to_index,
+                                            normalize_total=normalize_total)
+
+    test_dataset = SpatialAgingCellDataset(subfolder_name="test",
+                                        dataset_prefix=dataset,
+                                        target="expression",
+                                        k_hop=k_hop,
+                                        augment_hop=augment_hop,
+                                        node_feature=node_feature,
+                                        inject_feature=inject_feature,
+                                        num_cells_per_ct_id=100,
+                                        center_celltypes=center_celltypes,
+                                        use_ids=test_ids,
+                                        raw_filepaths=[file_path],
+                                        gene_list=gene_list,
+                                        celltypes_to_index=celltypes_to_index,
+                                        normalize_total=normalize_total)
     
-    try:
-        # Create dataset
-        dataset = SpatialAgingCellDataset(
-            root=".",
-            raw_filepaths=[temp_filepath],
-            k_hop=k_hop,
-            node_feature=node_feature,
-            inject_feature=inject_feature,
-            celltypes_to_index=celltypes_to_index,
-            **kwargs
+    test_dataset.process()
+    print("Finished processing test dataset", flush=True)
+    train_dataset.process()
+    print("Finished processing train dataset", flush=True)
+
+    return test_dataset, celltypes_to_index
+
+
+def _load_model_from_path(
+    model_path: str,
+    dataset: SpatialAgingCellDataset,
+    device: str
+) -> torch.nn.Module:
+    """
+    Load a trained GNN model from a saved state dictionary.
+    This follows the same pattern as model_performance.py
+    """
+    
+    # Initialize model with the same parameters as training
+    inject = dataset.inject_feature is not None
+    if inject:
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(dataset.get(0).x.shape[1]),
+            output_dim=len(dataset.get(0).y),
+            inject_dim=int(dataset.get(0).inject.shape[1]),
+            method="GIN", 
+            pool="add", 
+            num_layers=dataset.k_hop
         )
-        
-        return dataset
+    else:
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(dataset.get(0).x.shape[1]),
+            output_dim=len(dataset.get(0).y),
+            method="GIN", 
+            pool="add", 
+            num_layers=dataset.k_hop
+        )
     
-    finally:
-        # Clean up temporary file
-        if os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
+    # Load the state dictionary
+    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+    model.to(device)
+    model.eval()
+    
+    return model
 
 
 def _apply_perturbations_to_batch(
@@ -488,3 +626,29 @@ def visualize_perturbation_effects(
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
     plt.show() 
+
+
+if __name__ == "__main__":
+    data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
+    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/aging_coronal_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_TNP_NoneInject/DEBUG_weightedl1_1en04/best_model.pth"
+    
+    adata = sc.read_h5ad(data_path)
+    
+    # Use the same parameters as the training script
+    perturbations = [{'type': 'knockout', 'genes': ['Gm12878'], 'magnitude': 0.0, 'cell_types': ['T cell', 'NSC', 'Pericyte'], 'proportion': 1.0}]
+    adata_perturbed = predict_perturbation_effects(
+        adata=adata,
+        model_path=model_path,
+        perturbations=perturbations,
+        dataset="aging_coronal",
+        base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
+        k_hop=2,
+        augment_hop=2,
+        center_celltypes="T cell,NSC,Pericyte",
+        node_feature="expression",
+        inject_feature="None",
+        learning_rate=1e-4,
+        loss="weightedl1",
+        epochs=10
+    )
+    visualize_perturbation_effects(adata_perturbed)
