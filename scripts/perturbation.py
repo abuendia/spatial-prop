@@ -93,7 +93,7 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
             p = (1-L)*s+L*p_hat
             return(p)
         def get_L (s, p_hat):
-            L = 1/(1+torch.log(torch.abs(s-p_hat))) # logarithm decay of L from 1 to 0
+            L = 1/(1+torch.log(torch.abs(s-p_hat)+1)) # logarithm decay of L from 1 to 0
             return (L)
         #calibrated_perturb_expn = true_expn + ((pred_perturb_expn - pred_expn) * ((1+true_expn)/(1+pred_expn)))
         calibrated_perturb_expn = get_p(true_expn, pred_perturb_expn)
