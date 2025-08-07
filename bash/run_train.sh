@@ -13,4 +13,5 @@ CUDA_VISIBLE_DEVICES=1 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --inject_feature "none" \
     --learning_rate 0.0001 \
     --loss "weightedl1" \
-    --epochs 50
+    --epochs 50 \
+    --debug
