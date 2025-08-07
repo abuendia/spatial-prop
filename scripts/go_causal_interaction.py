@@ -230,6 +230,10 @@ def main():
         if (len(production_genes_overlap)==0) or (len(response_genes_overlap)==0):
             continue
             
+        print(term, flush=True)
+        print(f"num prod genes: {len(production_genes_overlap)}", flush=True)
+        print(f"num resp genes: {len(response_genes_overlap)}", flush=True)
+            
         # get gene indices
         production_indices = np.where(np.isin(gene_names, production_genes_overlap))[0]
         response_indices = np.where(np.isin(gene_names, response_genes_overlap))[0]
@@ -277,8 +281,8 @@ def main():
                 rout = predict (model, rdata, inject)
 
                 # temper perturbed expression
-                fperturbed = temper(actual, out, fout, method="distribution")
-                rperturbed = temper(actual, out, rout, method="distribution")
+                fperturbed = temper(actual, out, fout, method="distribution_renormalize")
+                rperturbed = temper(actual, out, rout, method="distribution_renormalize")
                 
                 start_forwards = []
                 perturb_forwards = []
@@ -306,7 +310,7 @@ def main():
                 perturb_reverses_list.append(np.array(perturb_reverses).flatten())
                 center_celltypes_list.append(np.array(celltypes_subbed).flatten())
             
-            print(f"Finished {round(prop,3)} proportion", flush=True)
+            #print(f"Finished {round(prop,3)} proportion", flush=True)
             
             # save lists
             save_dict = {

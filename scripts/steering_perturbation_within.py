@@ -274,7 +274,7 @@ def main():
             pout = predict (model, pdata, inject)
 
             # temper perturbed expression
-            perturbed = temper(actual, out, pout, method="distribution")
+            perturbed = temper(actual, out, pout, method="distribution_renormalize")
 
             start_expressions = []
             perturb_expressions = []
