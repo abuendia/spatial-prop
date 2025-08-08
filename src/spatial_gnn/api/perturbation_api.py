@@ -22,11 +22,107 @@ from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, GNN
 from spatial_gnn.scripts.perturbation import predict, perturb_data, get_center_celltypes, get_center_celltypes
 from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
 
+# celltype -> gene -> multiplier 
+# .obsm['perturbation_mask']
+# save result to .obsm['perturbation_results']
+
+def create_perturbation_mask(
+    adata: ad.AnnData,
+    perturbation_dict: Dict[str, Dict[str, float]],
+    mask_key: str = 'perturbation_mask'
+) -> ad.AnnData:
+    """
+    Create a perturbation mask from a cell type → gene → multiplier dictionary.
+    
+    This function generates a perturbation mask that specifies exactly what each gene 
+    in each cell should be perturbed to. The mask is stored in adata.obsm[mask_key].
+    
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object containing spatial transcriptomics data
+    perturbation_dict : Dict[str, Dict[str, float]]
+        Nested dictionary mapping cell_type → gene_name → multiplier.
+        - multiplier = 0.0: knockout (set expression to 0)
+        - multiplier = 2.0: 2x overexpression 
+        - multiplier = 0.5: 50% knockdown
+        - multiplier = 1.0: no change (default)
+    mask_key : str, default='perturbation_mask'
+        Key to store the perturbation mask in adata.obsm
+        
+    Returns
+    -------
+    anndata.AnnData
+        Updated AnnData object with perturbation mask in adata.obsm[mask_key]
+        
+    Examples
+    --------
+    >>> # Example: Knockout Gene1 in T cells, overexpress Gene2 in NSCs
+    >>> perturbation_dict = {
+    ...     'T cell': {'Gene1': 0.0},  # knockout
+    ...     'NSC': {'Gene2': 2.0}      # 2x overexpression
+    ... }
+    >>> adata_with_mask = create_perturbation_mask(adata, perturbation_dict)
+    """
+    
+    # Make a copy to avoid modifying the original
+    adata_result = adata.copy()
+    
+    # Initialize perturbation mask with ones (no perturbation by default)
+    n_cells, n_genes = adata_result.shape
+    perturbation_mask = np.ones((n_cells, n_genes), dtype=np.float32)
+    
+    # Check if celltype column exists
+    if 'celltype' not in adata_result.obs.columns:
+        raise ValueError("AnnData object must have 'celltype' column in obs")
+    
+    # Apply perturbations for each cell type
+    for cell_type, gene_multipliers in perturbation_dict.items():
+        # Find cells of this type
+        cell_mask = adata_result.obs['celltype'] == cell_type
+        cell_indices = np.where(cell_mask)[0]
+        
+        if len(cell_indices) == 0:
+            print(f"Warning: No cells found for cell type '{cell_type}'")
+            continue
+            
+        print(f"Applying perturbations to {len(cell_indices)} cells of type '{cell_type}'")
+        
+        # Apply gene-specific multipliers
+        for gene_name, multiplier in gene_multipliers.items():
+            if gene_name in adata_result.var_names:
+                gene_idx = adata_result.var_names.get_loc(gene_name)
+                perturbation_mask[cell_indices, gene_idx] = multiplier
+                print(f"  - Gene '{gene_name}': multiplier = {multiplier}")
+            else:
+                print(f"Warning: Gene '{gene_name}' not found in data")
+    
+    # Store the perturbation mask
+    adata_result.obsm[mask_key] = perturbation_mask
+    
+    # Store metadata about the perturbation
+    perturbation_info = {
+        'cell_types': list(perturbation_dict.keys()),
+        'n_perturbed_cells': sum(len(np.where(adata_result.obs['celltype'] == ct)[0]) 
+                                for ct in perturbation_dict.keys()),
+        'perturbed_genes': list(set(gene for genes in perturbation_dict.values() 
+                                   for gene in genes.keys()))
+    }
+    adata_result.uns['perturbation_info'] = perturbation_info
+    
+    print(f"\nPerturbation mask created:")
+    print(f"- Shape: {perturbation_mask.shape}")
+    print(f"- Cell types affected: {perturbation_info['cell_types']}")
+    print(f"- Cells affected: {perturbation_info['n_perturbed_cells']}")
+    print(f"- Genes affected: {perturbation_info['perturbed_genes']}")
+    print(f"- Mask stored in adata.obsm['{mask_key}']")
+    
+    return adata_result
+
 
 def predict_perturbation_effects(
     adata: ad.AnnData,
     model_path: str,
-    perturbations: List[Dict[str, Any]],
     dataset: str,
     base_path: str,
     k_hop: int,
@@ -34,6 +130,8 @@ def predict_perturbation_effects(
     center_celltypes: str,
     node_feature: str,
     inject_feature: str,
+    perturbations: Optional[List[Dict[str, Any]]] = None,
+    perturbation_mask_key: str = 'perturbation_mask',
     gene_list: Optional[str] = None,
     normalize_total: bool = True,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -45,8 +143,12 @@ def predict_perturbation_effects(
     """
     Predict the effects of perturbations on spatial transcriptomics data using a trained GNN model.
     
-    This function takes an AnnData object, applies specified perturbations, and uses a GNN model
-    to predict the resulting changes in gene expression across the spatial network.
+    This function takes an AnnData object with perturbations specified either through:
+    1. A perturbation mask stored in adata.obsm[perturbation_mask_key] (preferred), OR
+    2. A list of perturbation specifications (legacy mode)
+    
+    The function uses a GNN model to predict the resulting changes in gene expression 
+    across the spatial network.
     
     Parameters
     ----------
@@ -54,20 +156,24 @@ def predict_perturbation_effects(
         AnnData object containing spatial transcriptomics data with:
         - X: gene expression matrix (cells x genes)
         - obs: cell metadata including spatial coordinates and cell types
-        - obsm: spatial coordinates (e.g., 'spatial')
+        - obsm: spatial coordinates (e.g., 'spatial') and optionally perturbation_mask
         - var: gene metadata
     
     model_path : str
         Path to the saved model state dictionary (.pth file)
     
-    perturbations : List[Dict[str, Any]]
-        List of perturbation specifications. Each perturbation should be a dictionary with:
+    perturbations : Optional[List[Dict[str, Any]]], default=None
+        LEGACY: List of perturbation specifications. Each perturbation should be a dictionary with:
         - 'type': str, one of ['add', 'multiply', 'knockout', 'overexpression']
         - 'genes': List[str] or List[int], gene names or indices to perturb
         - 'magnitude': float, magnitude of perturbation
         - 'cell_types': Optional[List[str]], specific cell types to perturb (if None, all cells)
         - 'spatial_region': Optional[Dict], spatial region constraints
         - 'proportion': Optional[float], proportion of cells to perturb (default: 1.0)
+        NOTE: If perturbation_mask_key exists in adata.obsm, this parameter is ignored.
+    
+    perturbation_mask_key : str, default='perturbation_mask'
+        Key in adata.obsm containing the perturbation mask (cells x genes matrix of multipliers)
     
     dataset : str
         Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)
@@ -155,8 +261,22 @@ def predict_perturbation_effects(
     if not isinstance(model_path, str):
         raise TypeError("model_path must be a string")
     
-    if not isinstance(perturbations, list) or len(perturbations) == 0:
-        raise ValueError("perturbations must be a non-empty list")
+    # Check perturbation specification - either mask in obsm or legacy perturbations list
+    use_perturbation_mask = False
+    if adata is not None and perturbation_mask_key in adata.obsm:
+        use_perturbation_mask = True
+        print(f"Using perturbation mask from adata.obsm['{perturbation_mask_key}']")
+        # Validate mask dimensions
+        mask_shape = adata.obsm[perturbation_mask_key].shape
+        expected_shape = adata.shape
+        if mask_shape != expected_shape:
+            raise ValueError(f"Perturbation mask shape {mask_shape} doesn't match data shape {expected_shape}")
+    elif perturbations is not None:
+        if not isinstance(perturbations, list) or len(perturbations) == 0:
+            raise ValueError("perturbations must be a non-empty list")
+        print("Using legacy perturbations list")
+    else:
+        raise ValueError("Must provide either perturbation_mask in adata.obsm or perturbations list")
     
     # Load dataset configurations - exact same as train_gnn_model_expression.py
     def load_dataset_config():
@@ -271,10 +391,18 @@ def predict_perturbation_effects(
             # Get original predictions
             predictions_original = predict(model, batch_data, inject=inject_feature is not None)
             
+            # Store cell indices for mapping back to original data
+            cell_indices = _get_cell_indices_from_batch(batch_data, adata_result)
+            
             # Apply perturbations and get perturbed predictions
-            batch_data_perturbed, perturbation_mask = _apply_perturbations_to_batch(
-                batch_data, perturbations, adata_result, celltypes_to_index
-            )
+            if use_perturbation_mask:
+                batch_data_perturbed, perturbation_mask = _apply_perturbation_mask_to_batch(
+                    batch_data, adata_result, perturbation_mask_key, cell_indices
+                )
+            else:
+                batch_data_perturbed, perturbation_mask = _apply_perturbations_to_batch(
+                    batch_data, perturbations, adata_result, celltypes_to_index
+                )
             
             predictions_perturbed = predict(model, batch_data_perturbed, inject=inject_feature is not None)
             
@@ -282,9 +410,6 @@ def predict_perturbation_effects(
             all_predictions_original.append(predictions_original.cpu())
             all_predictions_perturbed.append(predictions_perturbed.cpu())
             all_perturbation_masks.append(perturbation_mask.cpu())
-            
-            # Store cell indices for mapping back to original data
-            cell_indices = _get_cell_indices_from_batch(batch_data, adata_result)
             all_cell_indices.extend(cell_indices)
     
     # Concatenate all results
@@ -600,6 +725,42 @@ def _load_model_from_path(
     return model
 
 
+def _apply_perturbation_mask_to_batch(
+    batch_data: Data,
+    adata: ad.AnnData,
+    perturbation_mask_key: str,
+    cell_indices: List[int]
+) -> Tuple[Data, torch.Tensor]:
+    """Apply perturbations using a pre-computed perturbation mask from adata.obsm."""
+    
+    batch_data_perturbed = batch_data.clone()
+    perturbation_mask_full = adata.obsm[perturbation_mask_key]
+    
+    # Create boolean mask for cells that have any perturbations (multiplier != 1.0)
+    perturbation_mask = torch.zeros(batch_data.x.shape[0], dtype=torch.bool)
+    
+    # Apply perturbations to each node in the batch
+    for i in range(batch_data.x.shape[0]):
+        # Map batch index to original cell index
+        if i < len(cell_indices):
+            cell_idx = cell_indices[i]
+            if cell_idx < perturbation_mask_full.shape[0]:
+                # Get the perturbation multipliers for this cell
+                cell_multipliers = perturbation_mask_full[cell_idx, :]
+                
+                # Apply multipliers to node features (element-wise multiplication)
+                if len(cell_multipliers) <= batch_data.x.shape[1]:
+                    batch_data_perturbed.x[i, :len(cell_multipliers)] *= torch.tensor(
+                        cell_multipliers, dtype=batch_data.x.dtype, device=batch_data.x.device
+                    )
+                    
+                    # Mark as perturbed if any multiplier is not 1.0
+                    if not np.allclose(cell_multipliers, 1.0):
+                        perturbation_mask[i] = True
+    
+    return batch_data_perturbed, perturbation_mask
+
+
 def _apply_perturbations_to_batch(
     batch_data: Data,
     perturbations: List[Dict[str, Any]],
@@ -872,12 +1033,16 @@ if __name__ == "__main__":
     
     adata = sc.read_h5ad(data_path)
     
-    # Use the same parameters as the training script
-    perturbations = [{'type': 'knockout', 'genes': ['Gm12878'], 'magnitude': 0.0, 'cell_types': ['T cell', 'NSC', 'Pericyte'], 'proportion': 1.0}]
+    perturbation_dict = {
+        'T cell': {'Gm12878': 0.0},      # knockout Gm12878 in T cells
+        'NSC': {'Gm12878': 0.0},         # knockout Gm12878 in NSCs  
+        'Pericyte': {'Gm12878': 0.0}     # knockout Gm12878 in Pericytes
+    }
+    
+    adata_with_mask = create_perturbation_mask(adata, perturbation_dict)
     adata_perturbed = predict_perturbation_effects(
-        adata=adata,  
+        adata=adata_with_mask,
         model_path=model_path,
-        perturbations=perturbations,
         dataset="aging_coronal",
         base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
         k_hop=2,
