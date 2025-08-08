@@ -281,8 +281,8 @@ def main():
                 rout = predict (model, rdata, inject)
 
                 # temper perturbed expression
-                fperturbed = temper(actual, out, fout, method="distribution_renormalize")
-                rperturbed = temper(actual, out, rout, method="distribution_renormalize")
+                fperturbed = temper(actual, out, fout, method="none") # distribution_renormalize
+                rperturbed = temper(actual, out, rout, method="none") # distribution_renormalize
                 
                 start_forwards = []
                 perturb_forwards = []
