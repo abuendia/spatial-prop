@@ -22,6 +22,56 @@ from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, GNN
 from spatial_gnn.scripts.perturbation import predict, perturb_data, get_center_celltypes, get_center_celltypes
 from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
 
+
+def _combine_expression_with_genept(expression_matrix, gene_names, genept_embeddings):
+    """
+    Combine raw expression values with GenePT embeddings.
+    
+    For each gene, multiply the raw expression value by the corresponding GenePT embedding.
+    This creates a feature vector that combines expression magnitude with semantic gene information.
+    
+    Parameters:
+    -----------
+    expression_matrix : np.ndarray
+        Expression matrix (cells x genes)
+    gene_names : np.ndarray
+        Gene names corresponding to the expression matrix
+    genept_embeddings : dict
+        Dictionary mapping gene names to their GenePT embeddings
+        
+    Returns:
+    --------
+    np.ndarray
+        Combined features matrix (cells x (genes * embedding_dim))
+    """
+    if genept_embeddings is None:
+        return expression_matrix
+    
+    # Get embedding dimension
+    emb_dim = len(next(iter(genept_embeddings.values())))
+    
+    # Initialize output matrix
+    n_cells, n_genes = expression_matrix.shape
+    combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
+    
+        # For each gene, combine expression with embedding
+    for i, gene_name in enumerate(gene_names):
+        # Convert gene name to uppercase for lookup
+        gene_name_upper = gene_name.upper()
+        if gene_name_upper in genept_embeddings:
+            # Get the GenePT embedding for this gene
+            gene_embedding = genept_embeddings[gene_name_upper]
+            
+            # Multiply expression values by the embedding
+            # This creates a feature vector where each element is expression * embedding_dim
+            for j in range(emb_dim):
+                combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
+        else:
+            # If gene not in embeddings, use zeros for that gene's embedding dimensions
+            combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
+    
+    return combined_features
+
 # celltype -> gene -> multiplier 
 # .obsm['perturbation_mask']
 # save result to .obsm['perturbation_results']
@@ -90,12 +140,14 @@ def create_perturbation_mask(
         
         # Apply gene-specific multipliers
         for gene_name, multiplier in gene_multipliers.items():
-            if gene_name in adata_result.var_names:
-                gene_idx = adata_result.var_names.get_loc(gene_name)
+            # Convert gene name to uppercase for lookup
+            gene_name_upper = gene_name.upper()
+            if gene_name_upper in adata_result.var_names:
+                gene_idx = adata_result.var_names.get_loc(gene_name_upper)
                 perturbation_mask[cell_indices, gene_idx] = multiplier
-                print(f"  - Gene '{gene_name}': multiplier = {multiplier}")
+                print(f"  - Gene '{gene_name_upper}': multiplier = {multiplier}")
             else:
-                print(f"Warning: Gene '{gene_name}' not found in data")
+                print(f"Warning: Gene '{gene_name_upper}' not found in data")
     
     # Store the perturbation mask
     adata_result.obsm[mask_key] = perturbation_mask
@@ -138,6 +190,7 @@ def predict_perturbation_effects(
     batch_size: int = 32,
     debug: bool = False,
     debug_subset_size: int = 100,
+    genept_embeddings_path: Optional[str] = None,
     **kwargs
 ) -> ad.AnnData:
     """
@@ -214,6 +267,11 @@ def predict_perturbation_effects(
     debug_subset_size : int, default=100
         Number of cells to use in debug mode
     
+    genept_embeddings_path : Optional[str], default=None
+        Path to JSON file containing GenePT embeddings. If provided, expression features will be
+        augmented by multiplying raw expression values with corresponding GenePT embeddings.
+        This combines expression magnitude with semantic gene information.
+    
     **kwargs
         Additional arguments passed to SpatialAgingCellDataset
     
@@ -250,7 +308,8 @@ def predict_perturbation_effects(
     ...     node_feature="expression",
     ...     inject_feature="None",
     ...     debug=True,
-    ...     debug_subset_size=50
+    ...     debug_subset_size=50,
+    ...     genept_embeddings_path="path/to/genept_embeddings.json"  # Optional
     ... )
     """
     
@@ -348,7 +407,7 @@ def predict_perturbation_effects(
         
         # Mode 1: User provided AnnData - create graphs on-the-fly
         graphs_data, gene_names, cell_type_indices = _create_graphs_from_adata(
-            adata, k_hop, node_feature, inject_feature, celltypes_to_index, normalize_total, debug, debug_subset_size
+            adata, k_hop, node_feature, inject_feature, celltypes_to_index, normalize_total, debug, debug_subset_size, genept_embeddings_path
         )
         # Load model using a sample from the graphs
         model = _load_model_from_graphs(model_path, graphs_data[0], device)
@@ -434,7 +493,8 @@ def _create_graphs_from_adata(
     celltypes_to_index: Dict[str, int],
     normalize_total: bool,
     debug: bool = False,
-    debug_subset_size: int = 100
+    debug_subset_size: int = 100,
+    genept_embeddings_path: Optional[str] = None
 ) -> Tuple[List[Data], List[str], np.ndarray]:
     """
     Create graph objects directly from AnnData, similar to how SpatialAgingCellDataset.process() works
@@ -462,8 +522,20 @@ def _create_graphs_from_adata(
         print("Normalized data")
         sc.pp.normalize_total(adata_copy, target_sum=adata_copy.shape[1])
     
-    # Get gene names
-    gene_names = adata_copy.var_names.values
+    # Get gene names and convert to uppercase for consistency
+    gene_names = np.array([gene.upper() for gene in adata_copy.var_names.values])
+    adata_copy.var_names = gene_names
+    
+    # Load GenePT embeddings if provided
+    genept_embeddings = None
+    if genept_embeddings_path is not None:
+        print(f"Loading GenePT embeddings from {genept_embeddings_path}")
+        with open(genept_embeddings_path, 'r') as f:
+            genept_embeddings = json.load(f)
+        # Convert all embeddings to np.array for efficient stacking
+        for k in genept_embeddings:
+            genept_embeddings[k] = np.array(genept_embeddings[k], dtype=np.float32)
+        print(f"Loaded {len(genept_embeddings)} GenePT embeddings")
     
     # Build spatial graph using Delaunay triangulation
     build_spatial_graph(adata_copy, method="delaunay")
@@ -487,6 +559,15 @@ def _create_graphs_from_adata(
             node_labels = torch.tensor(adata_copy.X).float()
         else:
             node_labels = torch.cat((node_labels, torch.tensor(adata_copy.X).float()), 1).float()
+        
+        # Combine with GenePT embeddings if available
+        if genept_embeddings is not None:
+            # Create GenePT-augmented expression features
+            genept_augmented_features = _combine_expression_with_genept(adata_copy.X, gene_names, genept_embeddings)
+            if node_feature == "expression":
+                node_labels = torch.tensor(genept_augmented_features).float()
+            else:
+                node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
     
     # Create graphs for each cell (simplified version - just create a few representative graphs)
     graphs = []
@@ -819,42 +900,6 @@ def _apply_perturbations_to_batch(
     return batch_data_perturbed, perturbation_mask
 
 
-def _create_cell_mask(
-    batch_data: Data,
-    cell_types: Optional[List[str]],
-    proportion: float,
-    celltypes_to_index: Dict[str, int]
-) -> torch.Tensor:
-    """Create a boolean mask for cells to perturb."""
-    
-    if cell_types is None:
-        # Perturb all cells
-        mask = torch.ones(batch_data.x.shape[0], dtype=torch.bool)
-    else:
-        # Perturb specific cell types
-        mask = torch.zeros(batch_data.x.shape[0], dtype=torch.bool)
-        for cell_type in cell_types:
-            if cell_type in celltypes_to_index:
-                ct_idx = celltypes_to_index[cell_type]
-                # This is a simplified approach - in practice, you'd need to map
-                # cell types to actual cells in the batch data
-                # For now, we'll assume all cells can be perturbed
-                mask = torch.ones(batch_data.x.shape[0], dtype=torch.bool)
-                break
-    
-    # Apply proportion
-    if proportion < 1.0:
-        num_cells = int(proportion * mask.sum().item())
-        if num_cells > 0:
-            # Randomly select cells to perturb
-            indices = torch.where(mask)[0]
-            selected_indices = indices[torch.randperm(len(indices))[:num_cells]]
-            mask = torch.zeros_like(mask)
-            mask[selected_indices] = True
-    
-    return mask
-
-
 def _get_cell_indices_from_batch(batch_data: Data, adata: ad.AnnData) -> List[int]:
     """Extract cell indices from batch data."""
     # Get the original indices from the AnnData object
@@ -1034,11 +1079,10 @@ if __name__ == "__main__":
     adata = sc.read_h5ad(data_path)
     
     perturbation_dict = {
-        'T cell': {'Gm12878': 0.0},      # knockout Gm12878 in T cells
-        'NSC': {'Gm12878': 0.0},         # knockout Gm12878 in NSCs  
-        'Pericyte': {'Gm12878': 0.0}     # knockout Gm12878 in Pericytes
+        'T cell': {'IGF2': 0.0},  
+        'NSC': {'SOX9': 2.0},         
+        'Pericyte': {'CCL4': 0.5}    
     }
-    
     adata_with_mask = create_perturbation_mask(adata, perturbation_dict)
     adata_perturbed = predict_perturbation_effects(
         adata=adata_with_mask,
@@ -1051,6 +1095,7 @@ if __name__ == "__main__":
         node_feature="expression",
         inject_feature="None",
         debug=True,
-        debug_subset_size=50
+        debug_subset_size=50,
+        genept_embeddings_path="/path/to/genept_embeddings.json"  # Optional: path to GenePT embeddings
     )
     visualize_perturbation_effects(adata_perturbed)

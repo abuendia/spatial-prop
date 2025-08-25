@@ -64,6 +64,7 @@ def main():
     parser.add_argument("--perturb_approach", help="perturbation method to use", type=str)
     parser.add_argument("--num_props", help="number of intervals from 0 to 1", type=int)
     parser.add_argument("--train_or_test", help="train or test dataset", type=str)
+    parser.add_argument("--use_genept_embeds", help="path to GenePT embeddings JSON file", type=str, default=None)
     
     args = parser.parse_args()
     
@@ -71,6 +72,7 @@ def main():
     perturb_approach = args.perturb_approach
     num_props = args.num_props
     train_or_test = args.train_or_test
+    use_genept_embeds = args.use_genept_embeds
 
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
@@ -146,7 +148,8 @@ def main():
                                             use_ids=train_ids,
                                             raw_filepaths=[file_path],
                                             gene_list=gene_list,
-                                            celltypes_to_index=celltypes_to_index)
+                                            celltypes_to_index=celltypes_to_index,
+                                            genept_embeddings_path=use_genept_embeds)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
                                         dataset_prefix=args.dataset,
@@ -160,7 +163,8 @@ def main():
                                         use_ids=test_ids,
                                         raw_filepaths=[file_path],
                                         gene_list=gene_list,
-                                        celltypes_to_index=celltypes_to_index)
+                                        celltypes_to_index=celltypes_to_index,
+                                        genept_embeddings_path=use_genept_embeds)
 
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
@@ -204,8 +208,8 @@ def main():
     # get savename
     savename = perturb_approach+"_"+str(num_props)+"steps_"+train_or_test
     
-    # get genes
-    gene_names = np.char.lower(train_dataset.gene_names.astype(str))
+    # get genes (convert to uppercase for consistency)
+    gene_names = np.char.upper(train_dataset.gene_names.astype(str))
     
     # Interaction Runs
         
@@ -218,9 +222,9 @@ def main():
     
     for term in terms_list:
     
-        # read in production and response gene lists
-        production_genes = np.char.lower(pd.read_csv(os.path.join(pairs_path,f"production_{term}.csv"), header=None).values.flatten().astype(str))
-        response_genes = np.char.lower(pd.read_csv(os.path.join(pairs_path,f"response_{term}.csv"), header=None).values.flatten().astype(str))
+        # read in production and response gene lists (convert to uppercase for consistency)
+        production_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"production_{term}.csv"), header=None).values.flatten().astype(str))
+        response_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"response_{term}.csv"), header=None).values.flatten().astype(str))
         
         # get overlapping genes
         production_genes_overlap = np.intersect1d(production_genes, gene_names)

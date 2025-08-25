@@ -99,7 +99,8 @@ class SpatialAgingCellDataset(Dataset):
                                      'T cell' : 16, 
                                      'B cell' : 17,
                                     },
-                 embedding_json=None
+                 embedding_json=None,
+                 genept_embeddings_path=None
                 ):
     
         self.root=root
@@ -133,9 +134,68 @@ class SpatialAgingCellDataset(Dataset):
             # Convert all embeddings to np.array for efficient stacking
             for k in self.cell_embeddings:
                 self.cell_embeddings[k] = np.array(self.cell_embeddings[k], dtype=np.float32)
+        
+        # Load GenePT embeddings if provided
+        self.genept_embeddings_path = genept_embeddings_path
+        self.genept_embeddings = None
+        if genept_embeddings_path is not None:
+            print(f"Loading GenePT embeddings from {genept_embeddings_path}")
+            with open(genept_embeddings_path, 'r') as f:
+                self.genept_embeddings = json.load(f)
+            # Convert all embeddings to np.array for efficient stacking
+            for k in self.genept_embeddings:
+                self.genept_embeddings[k] = np.array(self.genept_embeddings[k], dtype=np.float32)
+            print(f"Loaded {len(self.genept_embeddings)} GenePT embeddings")
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
+    
+    def _combine_expression_with_genept(self, expression_matrix, gene_names):
+        """
+        Combine raw expression values with GenePT embeddings.
+        
+        For each gene, multiply the raw expression value by the corresponding GenePT embedding.
+        This creates a feature vector that combines expression magnitude with semantic gene information.
+        
+        Parameters:
+        -----------
+        expression_matrix : np.ndarray
+            Expression matrix (cells x genes)
+        gene_names : np.ndarray
+            Gene names corresponding to the expression matrix
+            
+        Returns:
+        --------
+        np.ndarray
+            Combined features matrix (cells x (genes * embedding_dim))
+        """
+        if self.genept_embeddings is None:
+            return expression_matrix
+        
+        # Get embedding dimension
+        emb_dim = len(next(iter(self.genept_embeddings.values())))
+        
+        # Initialize output matrix
+        n_cells, n_genes = expression_matrix.shape
+        combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
+        
+        # For each gene, combine expression with embedding
+        for i, gene_name in enumerate(gene_names):
+            # Convert gene name to uppercase for lookup
+            gene_name_upper = gene_name.upper()
+            if gene_name_upper in self.genept_embeddings:
+                # Get the GenePT embedding for this gene
+                gene_embedding = self.genept_embeddings[gene_name_upper]
+                
+                # Multiply expression values by the embedding
+                # This creates a feature vector where each element is expression * embedding_dim
+                for j in range(emb_dim):
+                    combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
+            else:
+                # If gene not in embeddings, use zeros for that gene's embedding dimensions
+                combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
+        
+        return combined_features
     
     @property
     def processed_dir(self) -> str:
@@ -144,7 +204,11 @@ class SpatialAgingCellDataset(Dataset):
         else:
             aug_key = int(self.augment_cutoff*100)
         celltype_firstletters = "".join([x[0] for x in self.center_celltypes])
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
+        
+        # Add GenePT indicator to directory name if embeddings are used
+        genept_suffix = "_GenePT" if self.genept_embeddings is not None else ""
+        
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
@@ -188,7 +252,10 @@ class SpatialAgingCellDataset(Dataset):
         # read in genes
         gene_names = self.gene_names
         
-        # save genes
+        # Convert gene names to uppercase for consistency
+        gene_names = np.array([gene.upper() for gene in gene_names])
+        
+        # save genes (already converted to uppercase)
         if self.subfolder_name is not None:
             genefn = self.processed_dir.split("/")[-2]
         else:
@@ -222,6 +289,10 @@ class SpatialAgingCellDataset(Dataset):
             
             # order by gene_names
             adata = adata[:, gene_names]
+            
+            # Convert all gene names to uppercase for consistency
+            adata.var_names = [gene.upper() for gene in adata.var_names]
+            gene_names = np.array([gene.upper() for gene in gene_names])
             
             # make and save subgraphs
             subgraph_count = 0
@@ -263,6 +334,16 @@ class SpatialAgingCellDataset(Dataset):
                         node_labels = torch.tensor(sub_adata.X).float()
                     else:
                         node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
+                    
+                    # Combine with GenePT embeddings if available
+                    if self.genept_embeddings is not None:
+                        # Create GenePT-augmented expression features
+                        genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(genept_augmented_features).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
+                    
                     # add missing gene indicators where == -1
                     #node_labels = torch.cat((node_labels, torch.tensor((sub_adata.X==-1).astype(float))), 1).float()
                 
@@ -676,8 +757,7 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
         # print(f"To cuda time: {end - start}", flush=True)
         
         start = time.time()
-        breakpoint()
-        
+
         if inject is False:
             out = model(data.x, data.edge_index, data.batch, None)  # Perform a single forward pass.
         else:
