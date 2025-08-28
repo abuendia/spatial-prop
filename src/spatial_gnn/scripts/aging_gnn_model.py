@@ -7,6 +7,7 @@ import anndata as ad
 from scipy.stats import pearsonr, spearmanr, ttest_ind
 import os
 from scipy.sparse import issparse
+import pickle
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -140,8 +141,8 @@ class SpatialAgingCellDataset(Dataset):
         self.genept_embeddings = None
         if genept_embeddings_path is not None:
             print(f"Loading GenePT embeddings from {genept_embeddings_path}")
-            with open(genept_embeddings_path, 'r') as f:
-                self.genept_embeddings = json.load(f)
+            with open(genept_embeddings_path, 'rb') as f:
+                self.genept_embeddings = pickle.load(f)
             # Convert all embeddings to np.array for efficient stacking
             for k in self.genept_embeddings:
                 self.genept_embeddings[k] = np.array(self.genept_embeddings[k], dtype=np.float32)
