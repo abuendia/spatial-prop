@@ -92,7 +92,8 @@ class SpatialAgingCellDataset(Dataset):
                                      'B cell' : 17,
                                     },
                  embedding_json=None,
-                 genept_embeddings_path=None
+                 genept_embeddings_path=None,
+                 perturbation_mask_key="perturbation_mask"
                 ):
     
         self.root=root
@@ -120,6 +121,7 @@ class SpatialAgingCellDataset(Dataset):
         self._indices = None
         self.embedding_json = embedding_json
         self.cell_embeddings = None
+        self.perturbation_mask_key=perturbation_mask_key
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
                 self.cell_embeddings = json.load(f)
@@ -200,7 +202,7 @@ class SpatialAgingCellDataset(Dataset):
         # Add GenePT indicator to directory name if embeddings are used
         genept_suffix = "_GenePT" if self.genept_embeddings is not None else ""
         
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}"
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}_{self.perturbation_mask_key}"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
@@ -315,22 +317,48 @@ class SpatialAgingCellDataset(Dataset):
                 if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
                     raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
                 
+                # Check if perturbation mask exists and use it for expression features
+                use_perturbation_expression = False
+                if self.perturbation_mask_key in sub_adata.obs.keys():
+                    use_perturbation_expression = True
+                    print(f"Using perturbation mask from {self.perturbation_mask_key}")
+                
                 if "celltype" in self.node_feature:
                     # get cell type one hot encoding
                     node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
                     node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
                 
                 if "expression" in self.node_feature:
-                    # get spatial expression
-                    if self.node_feature == "expression":
-                        node_labels = torch.tensor(sub_adata.X).float()
+                    # get spatial expression - use perturbation mask if available
+                    if use_perturbation_expression:
+                        # Use perturbation mask values instead of original expression
+                        perturbation_expression = np.array([sub_adata.obs[self.perturbation_mask_key].iloc[i] for i in range(sub_adata.shape[0])])
+                        
+                        # Reshape to match gene dimensions if needed
+                        if len(perturbation_expression.shape) == 1:
+                            # Single value per cell, expand to match gene dimensions
+                            perturbation_expression = np.tile(perturbation_expression[:, np.newaxis], (1, sub_adata.shape[1]))
+                        
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(perturbation_expression).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(perturbation_expression).float()), 1).float()
                     else:
-                        node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
+                        # Use original expression values
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(sub_adata.X).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
                     
                     # Combine with GenePT embeddings if available
                     if self.genept_embeddings is not None:
-                        # Create GenePT-augmented expression features
-                        genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
+                        if use_perturbation_expression:
+                            # Use perturbation expression for GenePT combination
+                            genept_augmented_features = self._combine_expression_with_genept(perturbation_expression, sub_adata.var_names)
+                        else:
+                            # Use original expression for GenePT combination
+                            genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
+                        
                         if self.node_feature == "expression":
                             node_labels = torch.tensor(genept_augmented_features).float()
                         else:
@@ -407,7 +435,9 @@ class SpatialAgingCellDataset(Dataset):
                                                  region = subgraph_region,
                                                  age = subgraph_age,
                                                  condition = subgraph_cond,
-                                                 dataset = raw_filepath)
+                                                 dataset = raw_filepath, 
+                                                 original_cell_idx = cidx,
+                                                 original_cell_id = sub_adata.obs_names[cidx])
                         else:
                             subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
@@ -419,7 +449,9 @@ class SpatialAgingCellDataset(Dataset):
                                              age = subgraph_age,
                                              condition = subgraph_cond,
                                              inject = injected_labels,
-                                             dataset = raw_filepath) 
+                                             dataset = raw_filepath, 
+                                             original_cell_idx = cidx,
+                                             original_cell_id = sub_adata.obs_names[cidx])
 
                         # save object
                         torch.save(subgraph_data,
@@ -486,7 +518,9 @@ class SpatialAgingCellDataset(Dataset):
                                                      region = subgraph_region,
                                                      age = subgraph_age,
                                                      condition = subgraph_cond,
-                                                     dataset = raw_filepath)
+                                                     dataset = raw_filepath, 
+                                                     original_cell_idx = cidx,
+                                                     original_cell_id = sub_adata.obs_names[cidx])
                             else:
                                 subgraph_data = Data(x = sub_node_labels,
                                                      edge_index = sub_edge_index,
@@ -498,7 +532,9 @@ class SpatialAgingCellDataset(Dataset):
                                                      age = subgraph_age,
                                                      condition = subgraph_cond,
                                                      inject = injected_labels,
-                                                     dataset = raw_filepath)
+                                                     dataset = raw_filepath, 
+                                                     original_cell_idx = cidx,
+                                                     original_cell_id = sub_adata.obs_names[cidx])
 
                             # save object
                             torch.save(subgraph_data,

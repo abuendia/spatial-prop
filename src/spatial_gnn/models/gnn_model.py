@@ -177,52 +177,19 @@ class WeightedL1Loss(_Loss):
 
 def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
     model.train()
-    
-    import time
-    start = time.time()
-    
-    
-    for data in loader:  # Iterate in batches over the training dataset.
-        
-        end = time.time()
-        # print(f"Data load time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        data.to(device)
-        
-        end = time.time()
-        # print(f"To cuda time: {end - start}", flush=True)
-        
-        start = time.time()
 
+    for data in loader:  # Iterate in batches over the training dataset.
+        data.to(device)
         if inject is False:
             out = model(data.x, data.edge_index, data.batch, None)  # Perform a single forward pass.
         else:
             out = model(data.x, data.edge_index, data.batch, data.inject) # Perform a single forward pass.
         
-        end = time.time()
-        # print(f"Forward pass time: {end - start}", flush=True)
-        
-        start = time.time()
-        
         loss = criterion(out, data.y)  # Compute the loss.
-        
-        end = time.time()
-        # print(f"Loss time: {end - start}", flush=True)
-        
-        start = time.time()
-        
+                
         loss.backward()  # Derive gradients.
         optimizer.step()  # Update parameters based on gradients.
         optimizer.zero_grad()  # Clear gradients.
-        
-        end = time.time()
-        # print(f"Backward pass time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        # print(data.x.device)
         
 
 def test(model, loader, loss, criterion, inject=False, device="cuda"):
@@ -249,3 +216,62 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
             errors.append(npcc_loss(out, data.y.unsqueeze(1)).item())
         
     return np.mean(errors)  # Derive ratio of correct predictions.
+
+def predict(model, dataloader, adata, device="cuda"):
+    """
+    Convert GNN model predictions back to AnnData format using the stored mapping info.
+    
+    Parameters:
+    -----------
+    model : GNN
+        Trained GNN model
+    dataloader : DataLoader
+        PyTorch Geometric dataloader
+    original_adata : AnnData
+        Original AnnData object used to create the dataset
+    device : str
+        Device to run inference on
+        
+    Returns:
+    --------
+    AnnData
+        Updated AnnData with predictions in .X
+    """
+    model.eval()
+    
+    # Create prediction matrix with same shape as original
+    n_cells, n_genes = adata.shape
+    prediction_matrix = np.zeros((n_cells, n_genes), dtype=np.float32)
+    
+    # Track which cells have been predicted
+    predicted_cells = set()
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            batch.to(device)
+            
+            # Get predictions
+            if hasattr(batch, 'inject') and batch.inject is not None:
+                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
+            else:
+                out = model(batch.x, batch.edge_index, batch.batch, None)
+            
+            batch_predictions = out.cpu().numpy()
+            
+            # Map predictions back using stored information
+            for i, (pred, original_cell_idx, original_cell_id) in enumerate(zip(
+                batch_predictions, batch.original_cell_idx, batch.original_cell_id)):
+                
+                # Map predictions to the correct cell and genes
+                if len(pred) == n_genes:
+                    prediction_matrix[original_cell_idx, :] = pred
+                else:
+                    raise ValueError(f"Warning: Prediction dimension {len(pred)} doesn't match genes {n_genes}")
+                
+                predicted_cells.add(original_cell_idx)
+    
+    # save in a new field in the anndata
+    adata.layers['perturbation_effects'] = prediction_matrix
+    print(f"Predicted {len(predicted_cells)} cells out of {n_cells} total cells")
+    
+    return adata

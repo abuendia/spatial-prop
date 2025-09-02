@@ -20,55 +20,8 @@ import matplotlib.pyplot as plt
 from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, predict, GNN
 from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
 from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
-from spatial_gnn.scripts.utils import load_model_from_path
-
-
-def _combine_expression_with_genept(expression_matrix, gene_names, genept_embeddings):
-    """
-    Combine raw expression values with GenePT embeddings.
-    
-    For each gene, multiply the raw expression value by the corresponding GenePT embedding.
-    This creates a feature vector that combines expression magnitude with semantic gene information.
-    
-    Parameters:
-    -----------
-    expression_matrix : np.ndarray
-        Expression matrix (cells x genes)
-    gene_names : np.ndarray
-        Gene names corresponding to the expression matrix
-    genept_embeddings : dict
-        Dictionary mapping gene names to their GenePT embeddings
-        
-    Returns:
-    --------
-    np.ndarray
-        Combined features matrix (cells x (genes * embedding_dim))
-    """
-    if genept_embeddings is None:
-        return expression_matrix
-    
-    # Get embedding dimension
-    emb_dim = len(next(iter(genept_embeddings.values())))
-    
-    # Initialize output matrix
-    n_cells, n_genes = expression_matrix.shape
-    combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
-    
-    # For each gene, combine expression with embedding
-    for i, gene_name in enumerate(gene_names):
-        if gene_name in genept_embeddings:
-            # Get the GenePT embedding for this gene
-            gene_embedding = genept_embeddings[gene_name]
-            
-            # Multiply expression values by the embedding
-            # This creates a feature vector where each element is expression * embedding_dim
-            for j in range(emb_dim):
-                combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
-        else:
-            # If gene not in embeddings, use zeros for that gene's embedding dimensions
-            combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
-    
-    return combined_features
+from spatial_gnn.utils.dataset_utils import load_model_from_path
+from spatial_gnn.utils.dataset_utils import create_graphs_from_adata
 
 
 def create_perturbation_mask(
@@ -157,24 +110,24 @@ def create_perturbation_mask(
 
 def predict_perturbation_effects(
     adata: ad.AnnData,
-    dataset: str,
-    base_path: str,
-    k_hop: int,
-    augment_hop: int,
-    center_celltypes: str,
-    node_feature: str,
-    inject_feature: str,
     model_path: Optional[str] = None,
     perturbation_mask_key: str = 'perturbation_mask',
-    gene_list: Optional[str] = None,
-    normalize_total: bool = True,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
-    debug: bool = False,
-    debug_subset_size: int = 100,
+    dataset: Optional[str] = None,
+    base_path: Optional[str] = None,
+    k_hop: int = 2,
+    augment_hop: int = 2,
+    center_celltypes: str = "all",
+    node_feature: str = "expression",
+    inject_feature: str = "None",
+    gene_list: Optional[str] = None,
+    normalize_total: bool = True,
     learning_rate: float = 1e-4,
     loss: str = "mse",
     epochs: int = 100,
+    debug: bool = False,
+    debug_subset_size: int = 100,
     **kwargs
 ) -> ad.AnnData:
     """
@@ -303,7 +256,6 @@ def predict_perturbation_effects(
     ...     debug_subset_size=50
     ... )
     """
-    
     # Validate inputs
     if adata is not None and not isinstance(adata, ad.AnnData):
         raise TypeError("adata must be an AnnData object or None")
@@ -313,7 +265,7 @@ def predict_perturbation_effects(
         
     # Handle model loading/training
     if model_path is not None:
-        model = load_model_from_path(model_path, device)
+        model, config = load_model_from_path(model_path, device)
         print(f"Loaded pretrained model from: {model_path}")
     else:
         # Train new model from scratch
@@ -337,233 +289,20 @@ def predict_perturbation_effects(
         )
         print(f"Training completed. Model saved to: {trained_model_path}")
 
-    # Create graphs from the input AnnData using the existing function
+    # Create graphs from the input AnnData
     print("Creating graphs from input data...")
-    graphs_data, gene_names, cell_indices_mapping = _create_graphs_from_adata(
+    inference_dataloader = create_graphs_from_adata(
         adata=adata,
-        k_hop=k_hop,
-        node_feature=node_feature,
-        inject_feature=inject_feature,
-        celltypes_to_index=celltypes_to_index,
-        normalize_total=normalize_total,
-        debug=debug,
-        debug_subset_size=debug_subset_size
-    )
-    
-    if not graphs_data:
-        raise ValueError("No valid graphs could be created from the input data")
-    
-    print(f"Created {len(graphs_data)} graphs from input data")
-    
-    # Create a copy of the original data for results
-    adata_result = adata.copy()
-    
-    # Create dataloader from graphs
-    dataloader = DataLoader(graphs_data, batch_size=batch_size, shuffle=False)
-
-    # Initialize storage for results
-    all_predictions_original = []
-    all_predictions_perturbed = []
-    all_perturbation_masks = []
-    all_cell_indices = []
-    
-    # Process each batch
-    print("Running inference...")
-    with torch.no_grad():
-        for batch_idx, batch_data in enumerate(dataloader):
-            batch_data = batch_data.to(device)
-            
-            # Get original predictions
-            predictions_original = predict(model, batch_data, inject=inject_feature is not None)
-            
-            # Store cell indices for mapping back to original data
-            batch_cell_indices = [cell_indices_mapping[i] for i in range(batch_data.num_graphs)]
-            
-            # Apply perturbation mask to batch
-            batch_data_perturbed, perturbation_mask = _apply_perturbation_mask_to_batch(
-                batch_data, adata_result, perturbation_mask_key, batch_cell_indices
-            )
-            predictions_perturbed = predict(model, batch_data_perturbed, inject=inject_feature is not None)
-            
-            # Store results
-            all_predictions_original.append(predictions_original.cpu())
-            all_predictions_perturbed.append(predictions_perturbed.cpu())
-            all_perturbation_masks.append(perturbation_mask.cpu())
-            all_cell_indices.extend(batch_cell_indices)
-    
-    # Concatenate all results
-    predictions_original = torch.cat(all_predictions_original, dim=0)
-    predictions_perturbed = torch.cat(all_predictions_perturbed, dim=0)
-    perturbation_mask = torch.cat(all_perturbation_masks, dim=0)
-    
-    # Map predictions back to original AnnData structure
-    _add_predictions_to_adata(
-        adata_result, predictions_original, predictions_perturbed, 
-        perturbation_mask, all_cell_indices, gene_names
-    )
-    
+        model_config=config,
+        use_all_ids=True,
+        batch_size=batch_size,
+        perturbation_mask_key=perturbation_mask_key
+    )    
+    print(f"Created {len(inference_dataloader)} graphs from input data")
+    # Run model predict function
+    adata_result = predict(model, inference_dataloader, adata, device)
     print("Perturbation prediction completed successfully!")
     return adata_result
-
-
-def _create_graphs_from_adata(
-    adata: ad.AnnData,
-    k_hop: int,
-    node_feature: str,
-    inject_feature: Optional[str],
-    celltypes_to_index: Dict[str, int],
-    normalize_total: bool,
-    debug: bool = False,
-    debug_subset_size: int = 100,
-    genept_embeddings_path: Optional[str] = None
-) -> Tuple[List[Data], List[str], np.ndarray]:
-    """
-    Create graph objects by leveraging SpatialAgingCellDataset.process().
-    
-    Returns
-    -------
-    Tuple[List[Data], List[str], np.ndarray]
-        - List of graph Data objects
-        - List of gene names
-        - Array of original cell indices (for mapping back to original data)
-    """
-    # Create a minimal dataset instance
-    temp_dataset = SpatialAgingCellDataset(
-        root=".",
-        dataset_prefix="temp",
-        target="expression",
-        k_hop=k_hop,
-        augment_hop=0,  # No augmentation for inference
-        node_feature=node_feature,
-        inject_feature=inject_feature,
-        num_cells_per_ct_id=1,  # Take all cells
-        center_celltypes='all',  # Use all cell types
-        use_ids=None,  # Use all data
-        raw_filepaths=None,  # We'll set this after saving the file
-        gene_list=None,
-        celltypes_to_index=celltypes_to_index,
-        normalize_total=normalize_total,
-        genept_embeddings_path=genept_embeddings_path
-    )
-    
-    # Save the AnnData to a temporary file in the dataset's processed directory
-    temp_filepath = os.path.join(temp_dataset.processed_dir, "temp_adata.h5ad")
-    os.makedirs(temp_dataset.processed_dir, exist_ok=True)
-    adata.write(temp_filepath)
-    
-    # Set the filepath and process
-    temp_dataset.raw_filepaths = [temp_filepath]
-    temp_dataset.process()
-    
-    # Load all the created graphs
-    graphs = []
-    for i in range(len(temp_dataset)):
-        graph_data = temp_dataset.get(i)
-        graphs.append(graph_data)
-    
-    # Get gene names from the dataset
-    gene_names = temp_dataset.gene_names
-    
-    # Create cell indices mapping (since we're using all cells)
-    cell_indices = list(range(adata.shape[0]))
-    
-    # Clean up the temporary file
-    if os.path.exists(temp_filepath):
-        os.unlink(temp_filepath)
-    
-    return graphs, gene_names, cell_indices
-
-
-def _apply_perturbation_mask_to_batch(
-    batch_data: Data,
-    adata: ad.AnnData,
-    perturbation_mask_key: str,
-    batch_cell_indices: List[int]
-) -> Tuple[Data, torch.Tensor]:
-    """
-    Applies a perturbation mask to a batch of PyG Data objects.
-    
-    This function modifies the 'x' attribute of the graph Data objects in the batch
-    to reflect the perturbed expression values.
-    
-    Parameters
-    ----------
-    batch_data : torch_geometric.data.Data
-        Batch of graph Data objects.
-    adata : anndata.AnnData
-        Original AnnData object containing the perturbation mask.
-    perturbation_mask_key : str
-        Key in adata.obsm containing the perturbation mask (cells x genes matrix of multipliers).
-    batch_cell_indices : List[int]
-        List of original cell indices corresponding to the batch.
-        
-    Returns
-    -------
-    Tuple[torch_geometric.data.Data, torch.Tensor]
-        - Modified batch of graph Data objects.
-        - Tensor of perturbation masks for the batch.
-    """
-    perturbation_mask = torch.zeros((batch_data.num_graphs, adata.X.shape[1]), dtype=torch.float32)
-    
-    for i, cell_idx in enumerate(batch_cell_indices):
-        if cell_idx < len(adata.obsm[perturbation_mask_key]):
-            perturbation_mask[i, :] = adata.obsm[perturbation_mask_key][cell_idx, :]
-        else:
-            # If cell_idx is out of bounds, it means the cell was not in the original adata
-            # or the perturbation mask was not large enough.
-            # For now, we'll set it to zeros, which will result in no perturbation for this cell.
-            # A more robust solution might involve padding or handling this case.
-            pass
-    
-    # Apply perturbation mask to the 'x' attribute of each graph in the batch
-    for i in range(batch_data.num_graphs):
-        # Get the perturbation multiplier for this cell
-        perturbation_multiplier = perturbation_mask[i, :]
-        
-        # Apply the perturbation to the 'x' attribute of the graph
-        # This modifies the 'x' attribute in place
-        batch_data.x[i, :] = batch_data.x[i, :] * perturbation_multiplier
-    
-    return batch_data, perturbation_mask
-
-
-def _add_predictions_to_adata(
-    adata: ad.AnnData,
-    predictions_original: torch.Tensor,
-    predictions_perturbed: torch.Tensor,
-    perturbation_mask: torch.Tensor,
-    cell_indices: List[int],
-    gene_names: List[str]
-) -> None:
-    """Add prediction results to AnnData object."""
-    
-    # Convert predictions to numpy arrays
-    pred_orig_np = predictions_original.numpy()
-    pred_pert_np = predictions_perturbed.numpy()
-    pert_mask_np = perturbation_mask.numpy()
-    
-    # Create perturbation effects (difference)
-    perturbation_effects = pred_pert_np - pred_orig_np
-    
-    # Initialize layers with zeros for the full size of original data
-    n_cells = max(cell_indices) + 1 if cell_indices else adata.n_obs
-    n_genes = adata.X.shape[1]
-    
-    adata.layers['predicted_original'] = np.zeros((n_cells, n_genes))
-    adata.layers['predicted_perturbed'] = np.zeros((n_cells, n_genes))
-    adata.layers['perturbation_effects'] = np.zeros((n_cells, n_genes))
-    adata.obs['perturbation_mask'] = np.zeros(n_cells, dtype=bool)
-    
-    # Map predictions back to original cell order using the tracked indices
-    for i, cell_idx in enumerate(cell_indices):
-        if i < len(pred_orig_np):  # Check if we have predictions for this index
-            gene_length = min(len(gene_names), n_genes)
-            adata.layers['predicted_original'][cell_idx, :gene_length] = pred_orig_np[i, :gene_length]
-            adata.layers['predicted_perturbed'][cell_idx, :gene_length] = pred_pert_np[i, :gene_length]
-            adata.layers['perturbation_effects'][cell_idx, :gene_length] = perturbation_effects[i, :gene_length]
-            if i < len(pert_mask_np):
-                adata.obs.loc[cell_idx, 'perturbation_mask'] = pert_mask_np[i]
-
 
 def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
     """
@@ -690,6 +429,8 @@ def visualize_perturbation_effects(
 
 if __name__ == "__main__":
     data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
+    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed/aging_coronal_perturbed.h5ad"
+
     model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/aging_coronal_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_TNP_NoneInject/DEBUG_weightedl1_1en04/best_model.pth"
     
     adata = sc.read_h5ad(data_path)
@@ -700,41 +441,45 @@ if __name__ == "__main__":
         'Pericyte': {'Ccl4': 0.5}    
     }
     # Create perturbation mask and get file path
-    adata_file_path = create_perturbation_mask(adata, perturbation_dict)
+    adata_file_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
     
     # Example 1: Using pretrained model (inference mode)
+    # Params inferred from model config
     print("=== Example 1: Using pretrained model ===")
     adata_perturbed = predict_perturbation_effects(
-        adata_file_path, 
-        dataset="aging_coronal",
-        base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
-        k_hop=2,
-        augment_hop=2,
-        center_celltypes="T cell,NSC,Pericyte",
-        node_feature="expression",
-        inject_feature="None",
-        debug=True,
-        debug_subset_size=50
+        adata=adata,
+        model_path=model_path,
+        perturbation_mask_key="perturbation_mask"
     )
     
-    # Example 2: Training from scratch (training mode)
-    print("\n=== Example 2: Training from scratch ===")
-    adata_perturbed_trained = predict_perturbation_effects(
-        adata_file,  # Now this is a file path
-        model_path=None,  # No model path - trains new model
-        dataset="aging_coronal",
-        base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
-        k_hop=2,
-        augment_hop=2,
-        center_celltypes="T cell,NSC,Pericyte",
-        node_feature="expression",
-        inject_feature="None",
-        debug=True,
-        debug_subset_size=50,
-        learning_rate=1e-4,
-        loss="mse",
-        epochs=50  # Fewer epochs for demo
-    )
+
+    training_params = {
+        "k_hop": 2,
+        "augment_hop": 2,
+        "center_celltypes": "T cell,NSC,Pericyte",
+        "node_feature": "expression",
+        "inject_feature": "None",
+        "debug": True,
+        "debug_subset_size": 50
+    }
+    # # Example 2: Training from scratch (training mode)
+    # print("\n=== Example 2: Training from scratch ===")
+    # adata_perturbed_trained = predict_perturbation_effects(
+    #     adata_file,  # Now this is a file path
+    #     model_path=None,  # No model path - trains new model
+    #     dataset="aging_coronal",
+    #     base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
+    #     k_hop=2,
+    #     augment_hop=2,
+    #     center_celltypes="T cell,NSC,Pericyte",
+    #     node_feature="expression",
+    #     inject_feature="None",
+    #     debug=True,
+    #     debug_subset_size=50,
+    #     learning_rate=1e-4,
+    #     loss="mse",
+    #     epochs=50  # Fewer epochs for demo
+    # )
     
     # Visualize results from pretrained model
     visualize_perturbation_effects(adata_perturbed)

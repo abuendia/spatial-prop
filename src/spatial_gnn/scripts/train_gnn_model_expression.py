@@ -24,6 +24,7 @@ def train_model_from_scratch(
     learning_rate: float,
     loss: str,
     epochs: int,
+    num_cells_per_ct_id: int,
     dataset: Optional[str] = None,
     base_path: Optional[str] = None,
     exp_name: Optional[str] = None,
@@ -112,8 +113,6 @@ def train_model_from_scratch(
 
     print(f"Training on device: {device}", flush=True)
 
-    breakpoint()
-
     train_dataset = SpatialAgingCellDataset(
         subfolder_name="train",
         dataset_prefix=exp_name if exp_name is not None else dataset,
@@ -122,7 +121,7 @@ def train_model_from_scratch(
         augment_hop=augment_hop,
         node_feature=node_feature,
         inject_feature=inject_feature,
-        num_cells_per_ct_id=100,
+        num_cells_per_ct_id=num_cells_per_ct_id,
         center_celltypes=center_celltypes_parsed,
         use_ids=train_ids,
         raw_filepaths=[file_path],
@@ -139,7 +138,7 @@ def train_model_from_scratch(
         augment_hop=augment_hop,
         node_feature=node_feature,
         inject_feature=inject_feature,
-        num_cells_per_ct_id=100,
+        num_cells_per_ct_id=num_cells_per_ct_id,
         center_celltypes=center_celltypes_parsed,
         use_ids=test_ids,
         raw_filepaths=[file_path],
@@ -299,7 +298,12 @@ def train_model_from_scratch(
         "k_hop": k_hop,
         "augment_hop": augment_hop,
         "center_celltypes": center_celltypes,
-        "normalize_total": normalize_total
+        "normalize_total": normalize_total,
+        "train_ids": train_ids.tolist(),
+        "test_ids": test_ids.tolist(),
+        "data_file_path": file_path,
+        "celltypes_to_index": celltypes_to_index,
+        "num_cells_per_ct_id": num_cells_per_ct_id
     }
     
     config_path = os.path.join(save_dir, "model_config.json")
@@ -335,6 +339,7 @@ def main():
     parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
     parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
+    parser.add_argument("--num_cells_per_ct_id", help="number of cells per cell type to use for training", type=int, default=100)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     parser.add_argument("--normalize_total", action='store_true')
     parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
@@ -365,6 +370,7 @@ def main():
         learning_rate=args.learning_rate,
         loss=args.loss,
         epochs=args.epochs,
+        num_cells_per_ct_id=args.num_cells_per_ct_id,
         dataset=args.dataset,
         base_path=args.base_path,
         exp_name=args.exp_name,

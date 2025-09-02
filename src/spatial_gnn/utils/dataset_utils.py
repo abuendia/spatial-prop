@@ -7,8 +7,13 @@ import torch
 from sklearn.model_selection import train_test_split
 import anndata as ad
 import scanpy as sc
-
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
 from spatial_gnn.models.gnn_model import GNN
+
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+
 
 
 def load_dataset_config():
@@ -168,7 +173,7 @@ def load_model_from_path(model_path: str, device: str) -> torch.nn.Module:
     model.to(device)
     model.eval()
     
-    return model
+    return model, config
 
 
 def split_anndata_train_test(
@@ -225,3 +230,92 @@ def split_anndata_train_test(
     )
 
     return train_mouse_ids, test_mouse_ids
+
+
+def create_graphs_from_adata(
+    anndata_path: str,
+    dataset_name: str,
+    model_config: dict,
+    use_all_ids: bool = True,
+    batch_size: int = 32,
+    perturbation_mask_key: str = "perturbation_mask"
+) -> Tuple[List[Data], List[str], np.ndarray]:
+    """
+    Create graph objects by leveraging SpatialAgingCellDataset.process().
+    
+    Returns
+    -------
+    Tuple[List[Data], List[str], np.ndarray]
+        - List of graph Data objects
+        - List of gene names
+        - Array of original cell indices (for mapping back to original data)
+    """
+    inference_dataset = SpatialAgingCellDataset(
+        subfolder_name="predict",
+        dataset_prefix=dataset_name if dataset_name is not None else "temp",
+        target="expression",
+        k_hop=model_config["k_hop"],
+        augment_hop=model_config["augment_hop"],
+        node_feature=model_config["node_feature"],
+        inject_feature=model_config["inject_feature"],
+        num_cells_per_ct_id=model_config["num_cells_per_ct_id"],
+        center_celltypes=model_config["center_celltypes"],
+        use_ids=model_config["test_ids"] if use_all_ids is False else None,
+        raw_filepaths=[anndata_path],
+        gene_list=model_config["gene_list"],
+        celltypes_to_index=model_config["celltypes_to_index"],
+        normalize_total=model_config["normalize_total"],
+        perturbation_mask_key=perturbation_mask_key
+    )
+
+    inference_dataset.process()
+    inference_dataset_loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    return inference_dataset_loader
+
+
+def _combine_expression_with_genept(expression_matrix, gene_names, genept_embeddings):
+    """
+    Combine raw expression values with GenePT embeddings.
+    
+    For each gene, multiply the raw expression value by the corresponding GenePT embedding.
+    This creates a feature vector that combines expression magnitude with semantic gene information.
+    
+    Parameters:
+    -----------
+    expression_matrix : np.ndarray
+        Expression matrix (cells x genes)
+    gene_names : np.ndarray
+        Gene names corresponding to the expression matrix
+    genept_embeddings : dict
+        Dictionary mapping gene names to their GenePT embeddings
+        
+    Returns:
+    --------
+    np.ndarray
+        Combined features matrix (cells x (genes * embedding_dim))
+    """
+    if genept_embeddings is None:
+        return expression_matrix
+    
+    # Get embedding dimension
+    emb_dim = len(next(iter(genept_embeddings.values())))
+    
+    # Initialize output matrix
+    n_cells, n_genes = expression_matrix.shape
+    combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
+    
+    # For each gene, combine expression with embedding
+    for i, gene_name in enumerate(gene_names):
+        if gene_name in genept_embeddings:
+            # Get the GenePT embedding for this gene
+            gene_embedding = genept_embeddings[gene_name]
+            
+            # Multiply expression values by the embedding
+            # This creates a feature vector where each element is expression * embedding_dim
+            for j in range(emb_dim):
+                combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
+        else:
+            # If gene not in embeddings, use zeros for that gene's embedding dimensions
+            combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
+    
+    return combined_features
