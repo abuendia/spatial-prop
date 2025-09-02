@@ -318,7 +318,7 @@ def train_model_from_scratch(
         pickle.dump(training_results, f)
     print("Training logs saved")
 
-    return model, final_model_path
+    return model, model_config, final_model_path
 
 
 def main():

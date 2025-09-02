@@ -407,6 +407,7 @@ class SpatialAgingCellDataset(Dataset):
                 
                 graph_labels = [] # for computing quantiles later
                 for cidx in cell_idxs:
+                    cidx = int(cidx)
                     # get subgraph
                     sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
                     
@@ -484,10 +485,10 @@ class SpatialAgingCellDataset(Dataset):
                         absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
 
                     # get subgraphs and save for augmentation
-                    for cidx in augment_idxs:
-                                            
+                    for cidx in augment_idxs:               
                         # get subgraph
-                        sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
+                        cidx = int(cidx)
+                        sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(cidx, edge_index, node_labels, sub_adata)
                                             
                         # augmentation selection conditions
                         if self.augment_cutoff == "auto": # probabilistic

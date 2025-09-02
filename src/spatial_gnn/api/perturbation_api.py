@@ -17,11 +17,10 @@ import tqdm
 import matplotlib.pyplot as plt
 
 
-from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, predict, GNN
 from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
-from spatial_gnn.scripts.ageaccel_proximity import build_spatial_graph
 from spatial_gnn.utils.dataset_utils import load_model_from_path
 from spatial_gnn.utils.dataset_utils import create_graphs_from_adata
+from spatial_gnn.models.gnn_model import predict
 
 
 def create_perturbation_mask(
@@ -109,7 +108,7 @@ def create_perturbation_mask(
 
 
 def predict_perturbation_effects(
-    adata: ad.AnnData,
+    anndata_path: str,
     model_path: Optional[str] = None,
     perturbation_mask_key: str = 'perturbation_mask',
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -155,16 +154,6 @@ def predict_perturbation_effects(
     
     model_path : Optional[str], default=None
         Path to the saved model state dictionary (.pth file). If None, train a new model from scratch.
-    
-    perturbations : Optional[List[Dict[str, Any]]], default=None
-        LEGACY: List of perturbation specifications. Each perturbation should be a dictionary with:
-        - 'type': str, one of ['add', 'multiply', 'knockout', 'overexpression']
-        - 'genes': List[str] or List[int], gene names or indices to perturb
-        - 'magnitude': float, magnitude of perturbation
-        - 'cell_types': Optional[List[str]], specific cell types to perturb (if None, all cells)
-        - 'spatial_region': Optional[Dict], spatial region constraints
-        - 'proportion': Optional[float], proportion of cells to perturb (default: 1.0)
-        NOTE: If perturbation_mask_key exists in adata.obsm, this parameter is ignored.
     
     perturbation_mask_key : str, default='perturbation_mask'
         Key in adata.obsm containing the perturbation mask (cells x genes matrix of multipliers)
@@ -228,49 +217,21 @@ def predict_perturbation_effects(
         - 'predicted_perturbed': Predictions with perturbations applied
         - 'perturbation_effects': Difference between perturbed and original predictions
         - 'perturbation_mask': Boolean mask indicating which cells were perturbed
-    
-    Examples
-    --------
-    >>> # Example perturbation: knockout a gene in specific cell types
-    >>> perturbations = [{
-    ...     'type': 'knockout',
-    ...     'genes': ['Gene1', 'Gene2'],
-    ...     'magnitude': 0.0,
-    ...     'cell_types': ['Neuron-Excitatory', 'Neuron-Inhibitory'],
-    ...     'proportion': 0.5
-    ... }]
-    >>> 
-    >>> # Apply perturbations and get predictions
-    >>> adata_perturbed = predict_perturbation_effects(
-    ...     adata=adata,
-    ...     model_path="path/to/model.pth",
-    ...     perturbations=perturbations,
-    ...     dataset="aging_coronal",
-    ...     base_path="/path/to/data",
-    ...     k_hop=2,
-    ...     augment_hop=2,
-    ...     center_celltypes="all",
-    ...     node_feature="expression",
-    ...     inject_feature="None",
-    ...     debug=True,
-    ...     debug_subset_size=50
-    ... )
     """
     # Validate inputs
-    if adata is not None and not isinstance(adata, ad.AnnData):
-        raise TypeError("adata must be an AnnData object or None")
-    
+    if anndata_path is not None and not isinstance(anndata_path, str):
+        raise TypeError("anndata_path must be a string or None")
     if model_path is not None and not isinstance(model_path, str):
         raise TypeError("model_path must be a string or None")
         
     # Handle model loading/training
     if model_path is not None:
-        model, config = load_model_from_path(model_path, device)
+        model, model_config = load_model_from_path(model_path, device)
         print(f"Loaded pretrained model from: {model_path}")
     else:
         # Train new model from scratch
         print("No model path provided. Training new model from scratch...")
-        model, trained_model_path = train_model_from_scratch(
+        model, model_config, trained_model_path = train_model_from_scratch(
             dataset=dataset,
             base_path=base_path,
             k_hop=k_hop,
@@ -292,8 +253,9 @@ def predict_perturbation_effects(
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
     inference_dataloader = create_graphs_from_adata(
-        adata=adata,
-        model_config=config,
+        anndata_path=anndata_path,
+        dataset_name=dataset,
+        model_config=model_config,
         use_all_ids=True,
         batch_size=batch_size,
         perturbation_mask_key=perturbation_mask_key
@@ -447,7 +409,7 @@ if __name__ == "__main__":
     # Params inferred from model config
     print("=== Example 1: Using pretrained model ===")
     adata_perturbed = predict_perturbation_effects(
-        adata=adata,
+        anndata_path=adata_file_path,
         model_path=model_path,
         perturbation_mask_key="perturbation_mask"
     )
@@ -482,4 +444,4 @@ if __name__ == "__main__":
     # )
     
     # Visualize results from pretrained model
-    visualize_perturbation_effects(adata_perturbed)
+    # visualize_perturbation_effects(adata_perturbed)

@@ -14,7 +14,8 @@
 
 # # DEBUG: with anndata
 CUDA_VISIBLE_DEVICES=2 python /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/scripts/train_gnn_model_expression.py \
-    --anndata /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal_subset10.h5ad \
+    --dataset aging_coronal \
+    --base_path /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw \
     --k_hop 2 \
     --augment_hop 2 \
     --center_celltypes "T cell,NSC,Pericyte" \
@@ -24,4 +25,4 @@ CUDA_VISIBLE_DEVICES=2 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --loss "weightedl1" \
     --epochs 50 \
     --debug \
-    --exp_name "aging_coronal_debug"
+    --exp_name "aging_coronal"
