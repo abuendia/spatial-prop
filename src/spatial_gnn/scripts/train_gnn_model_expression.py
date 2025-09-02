@@ -1,22 +1,18 @@
-use_wandb = False
-
 import numpy as np
 import pickle
-import os
 from typing import Tuple, Union, Optional, List
 import argparse
 import tqdm
 import scanpy as sc
+import json
+import os
 
 import torch
 from torch_geometric.loader import DataLoader
 
-from spatial_gnn.scripts.aging_gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, SpatialAgingCellDataset
-from spatial_gnn.scripts.utils import load_dataset_config, get_dataset_config, parse_center_celltypes
-import json
-
-if use_wandb is True:
-    import wandb    
+from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.utils.dataset_utils import get_dataset_config, parse_center_celltypes, split_anndata_train_test
 
 
 def train_model_from_scratch(
@@ -30,7 +26,8 @@ def train_model_from_scratch(
     epochs: int,
     dataset: Optional[str] = None,
     base_path: Optional[str] = None,
-    adata: Optional['ad.AnnData'] = None,
+    exp_name: Optional[str] = None,
+    adata_path: Optional[str] = None,
     gene_list: Optional[List[str]] = None,
     normalize_total: bool = True,
     debug: bool = False,
@@ -41,9 +38,8 @@ def train_model_from_scratch(
     stratify_by: Optional[str] = None
 ) -> Tuple[GNN, str]:
     """
-    Train a GNN model from scratch using the same approach as the main training script.
+    Train a GNN model from scratch.
     
-    This function can be called from other modules to train models programmatically.
     It supports two modes:
     1. Dataset mode: Provide dataset name and base_path
     2. AnnData mode: Provide AnnData object directly
@@ -70,8 +66,10 @@ def train_model_from_scratch(
         Dataset name (aging_coronal, aging_sagittal, etc.) - required if not using AnnData
     base_path : Optional[str], default=None
         Base path to the data directory - required if not using AnnData
-    adata : Optional[anndata.AnnData], default=None
-        AnnData object to use directly - required if not using dataset+base_path
+    exp_name : Optional[str], default=None
+        Experiment name
+    adata_path : Optional[str], default=None
+        Path to AnnData object to use directly - required if not using dataset+base_path
     gene_list : Optional[List[str]], default=None
         List of genes to use
     normalize_total : bool, default=True
@@ -95,65 +93,30 @@ def train_model_from_scratch(
         - Trained model
         - Path to saved model
     """
-    
-    # Validate input parameters
-    if adata is not None:
-        # AnnData mode
-        if dataset is not None or base_path is not None:
-            raise ValueError("When providing AnnData object, do not specify dataset or base_path")
-        
-        # Import AnnData if not already imported
-        try:
-            import anndata as ad
-        except ImportError:
-            raise ImportError("AnnData is required for this mode. Install with 'pip install anndata'")
-        
-        # Split AnnData into train/test
-        from spatial_gnn.scripts.utils import split_anndata_train_test, extract_anndata_info
-        
-        train_adata, test_adata, train_ids, test_ids = split_anndata_train_test(
+    if adata_path is not None:    
+        adata = sc.read_h5ad(adata_path)  
+        train_ids, test_ids = split_anndata_train_test(
             adata, test_size=test_size, random_state=random_state, stratify_by=stratify_by
         )
-        
-        # Extract necessary information
-        config, file_path, celltypes_to_index = extract_anndata_info(
-            adata, center_celltypes, inject_feature
-        )
-        
-        # Save temporary files for processing
-        import tempfile
-        import os
-        
-        temp_dir = tempfile.mkdtemp()
-        train_file_path = os.path.join(temp_dir, "train_adata.h5ad")
-        test_file_path = os.path.join(temp_dir, "test_adata.h5ad")
-        
-        train_adata.write(train_file_path)
-        test_adata.write(test_file_path)
-        
-        print(f"Saved temporary files in {temp_dir}")
-        
+        celltypes_to_index = {ct: i for i, ct in enumerate(adata.obs["celltype"].unique())}
+        file_path = adata_path
     else:
-        # Dataset mode (original behavior)
-        if dataset is None or base_path is None:
-            raise ValueError("Either provide AnnData object or both dataset and base_path")
-        
-        config, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
-        train_file_path = file_path
-        test_file_path = file_path
+        _, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
     center_celltypes_parsed = parse_center_celltypes(center_celltypes)
     
-    # Handle inject_feature
     if inject_feature is not None and inject_feature.lower() == "none":
         inject_feature = None
-    inject = inject_feature is not None
-    
+        inject = False
+    else:
+        inject = True
+
     print(f"Training on device: {device}", flush=True)
 
-    # Initialize datasets
+    breakpoint()
+
     train_dataset = SpatialAgingCellDataset(
         subfolder_name="train",
-        dataset_prefix="anndata" if adata is not None else dataset,
+        dataset_prefix=exp_name if exp_name is not None else dataset,
         target="expression",
         k_hop=k_hop,
         augment_hop=augment_hop,
@@ -162,7 +125,7 @@ def train_model_from_scratch(
         num_cells_per_ct_id=100,
         center_celltypes=center_celltypes_parsed,
         use_ids=train_ids,
-        raw_filepaths=[train_file_path],
+        raw_filepaths=[file_path],
         gene_list=gene_list,
         celltypes_to_index=celltypes_to_index,
         normalize_total=normalize_total
@@ -170,7 +133,7 @@ def train_model_from_scratch(
 
     test_dataset = SpatialAgingCellDataset(
         subfolder_name="test",
-        dataset_prefix="anndata" if adata is not None else dataset,
+        dataset_prefix=exp_name if exp_name is not None else dataset,
         target="expression",
         k_hop=k_hop,
         augment_hop=augment_hop,
@@ -179,7 +142,7 @@ def train_model_from_scratch(
         num_cells_per_ct_id=100,
         center_celltypes=center_celltypes_parsed,
         use_ids=test_ids,
-        raw_filepaths=[test_file_path],
+        raw_filepaths=[file_path],
         gene_list=gene_list,
         celltypes_to_index=celltypes_to_index,
         normalize_total=normalize_total
@@ -231,7 +194,7 @@ def train_model_from_scratch(
     print(f"Test samples: {len(all_test_data)}", flush=True)
 
     # Initialize model
-    if inject:
+    if inject is True:
         model = GNN(
             hidden_channels=64,
             input_dim=int(train_dataset.get(0).x.shape[1]),
@@ -277,9 +240,9 @@ def train_model_from_scratch(
     training_results = {"metric": loss, "epoch": [], "train": [], "test": []}
 
     # Create directory to save results
-    exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
+    exp_dir_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
     if debug:
-        exp_name = f"DEBUG_{exp_name}"
+        exp_dir_name = f"DEBUG_{exp_dir_name}"
     
     model_dirname = loss + f"_{learning_rate:.0e}".replace("-", "n")
     if debug:
@@ -326,7 +289,7 @@ def train_model_from_scratch(
     model_config = {
         "input_dim": int(train_dataset.get(0).x.shape[1]),
         "output_dim": len(train_dataset.get(0).y),
-        "inject_dim": int(train_dataset.get(0).inject.shape[1]) if inject else 0,
+        "inject_dim": int(train_dataset.get(0).inject.shape[1]) if inject_feature is not None else 0,
         "num_layers": k_hop,
         "hidden_channels": 64,
         "method": "GIN",
@@ -351,20 +314,10 @@ def train_model_from_scratch(
         pickle.dump(training_results, f)
     print("Training logs saved")
 
-    # Clean up temporary files if using AnnData mode
-    if adata is not None:
-        import shutil
-        try:
-            shutil.rmtree(temp_dir)
-            print(f"Cleaned up temporary directory: {temp_dir}")
-        except Exception as e:
-            print(f"Warning: Could not clean up temporary directory {temp_dir}: {e}")
-
     return model, final_model_path
 
 
 def main():
-    # set up arguments
     parser = argparse.ArgumentParser()
     
     # Add mutually exclusive group for data input
@@ -372,6 +325,7 @@ def main():
     data_group.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
     data_group.add_argument("--anndata", help="Path to AnnData file (.h5ad) to use directly", type=str)
     
+    parser.add_argument("--exp_name", help="Experiment name", type=str, default=None)
     parser.add_argument("--base_path", help="Base path to the data directory (required if using --dataset)", type=str)
     parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
     parser.add_argument("--augment_hop", help="number of hops to take for graph augmentation", type=int, required=True)
@@ -402,16 +356,6 @@ def main():
     if args.anndata and args.base_path:
         parser.error("--base_path should not be specified when using --anndata")
 
-    # Load AnnData if specified
-    adata = None
-    if args.anndata:
-        adata = sc.read_h5ad(args.anndata)
-        print(f"Loaded AnnData from {args.anndata}")
-        print(f"Shape: {adata.shape}")
-        if 'celltype' in adata.obs.columns:
-            print(f"Cell types: {adata.obs['celltype'].unique()}")
-
-
     train_model_from_scratch(
         k_hop=args.k_hop,
         augment_hop=args.augment_hop,
@@ -423,7 +367,8 @@ def main():
         epochs=args.epochs,
         dataset=args.dataset,
         base_path=args.base_path,
-        adata=adata,
+        exp_name=args.exp_name,
+        adata_path=args.anndata,
         gene_list=args.gene_list,
         normalize_total=args.normalize_total,
         debug=args.debug,

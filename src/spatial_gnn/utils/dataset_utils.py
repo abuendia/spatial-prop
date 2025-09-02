@@ -4,13 +4,11 @@ from typing import Union, List, Optional, Tuple
 import numpy as np
 
 import torch
-from torch_geometric.data import Data, Dataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.utils import k_hop_subgraph, one_hot
-from scipy.sparse import issparse
-from torch_geometric.utils.convert import from_scipy_sparse_matrix
+from sklearn.model_selection import train_test_split
+import anndata as ad
+import scanpy as sc
 
-from spatial_gnn.scripts.aging_gnn_model import SpatialAgingCellDataset, predict, GNN
+from spatial_gnn.models.gnn_model import GNN
 
 
 def load_dataset_config():
@@ -178,9 +176,9 @@ def split_anndata_train_test(
     test_size: float = 0.2,
     random_state: int = 42,
     stratify_by: Optional[str] = None
-) -> Tuple['ad.AnnData', 'ad.AnnData', List[str], List[str]]:
+) -> Tuple[List[str], List[str]]:
     """
-    Split an AnnData object into train and test sets.
+    Split an AnnData object into train and test sets based on mouse_id.
     
     Parameters
     ----------
@@ -195,101 +193,35 @@ def split_anndata_train_test(
         
     Returns
     -------
-    Tuple[anndata.AnnData, anndata.AnnData, List[str], List[str]]
-        - Training AnnData object
-        - Testing AnnData object  
+    Tuple[List[str], List[str]]
         - List of training cell IDs
         - List of testing cell IDs
     """
-    # Set random seed
-    np.random.seed(random_state)
+
+    # Get unique mouse IDs
+    unique_mouse_ids = adata.obs["mouse_id"].unique()
     
-    # Get all cell IDs
-    all_cell_ids = adata.obs_names.tolist()
-    n_cells = len(all_cell_ids)
-    n_test = int(n_cells * test_size)
-    
-    if stratify_by is not None and stratify_by in adata.obs.columns:
-        # Stratified split
-        from sklearn.model_selection import train_test_split
-        
-        # Get stratification labels
-        stratify_labels = adata.obs[stratify_by].values
-        
-        # Perform stratified split
-        train_indices, test_indices = train_test_split(
-            range(n_cells),
-            test_size=test_size,
-            random_state=random_state,
-            stratify=stratify_labels
-        )
-        
-        train_ids = [all_cell_ids[i] for i in train_indices]
-        test_ids = [all_cell_ids[i] for i in test_indices]
+    if stratify_by is not None:
+        # For stratification, we need to get the most common value per mouse
+        # Group by mouse_id and get the most frequent value for stratify_by
+        mouse_stratify_values = []
+        for mouse_id in unique_mouse_ids:
+            mouse_mask = adata.obs["mouse_id"] == mouse_id
+            mouse_stratify = adata.obs.loc[mouse_mask, stratify_by].mode()
+            if len(mouse_stratify) > 0:
+                mouse_stratify_values.append(mouse_stratify.iloc[0])
+            else:
+                mouse_stratify_values.append(None)
+        stratify_labels = mouse_stratify_values
     else:
-        # Random split
-        test_indices = np.random.choice(n_cells, size=n_test, replace=False)
-        train_indices = np.setdiff1d(range(n_cells), test_indices)
-        
-        train_ids = [all_cell_ids[i] for i in train_indices]
-        test_ids = [all_cell_ids[i] for i in test_indices]
+        stratify_labels = None
     
-    # Create train and test AnnData objects
-    train_adata = adata[train_ids].copy()
-    test_adata = adata[test_ids].copy()
-    
-    print(f"Split {n_cells} cells into {len(train_ids)} training and {len(test_ids)} testing cells")
-    
-    return train_adata, test_adata, train_ids, test_ids
+    # Split unique mouse IDs
+    train_mouse_ids, test_mouse_ids = train_test_split(
+        unique_mouse_ids,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify_labels
+    )
 
-
-def extract_anndata_info(
-    adata: 'ad.AnnData',
-    center_celltypes: Union[str, List[str], None] = None,
-    inject_feature: Optional[str] = None
-) -> Tuple[dict, str, dict]:
-    """
-    Extract necessary information from AnnData object for training.
-    
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        Input AnnData object
-    center_celltypes : Union[str, List[str], None], default=None
-        Cell types to center graphs on
-    inject_feature : Optional[str], default=None
-        Inject feature type
-        
-    Returns
-    -------
-    Tuple[dict, str, dict]
-        - Configuration dictionary
-        - File path (temporary)
-        - Cell types to index mapping
-    """
-    if not ANNDATA_AVAILABLE:
-        raise ImportError("AnnData is required for this function. Install with 'pip install anndata'")
-    
-    # Create a minimal config
-    config = {
-        'file_path': 'temp_anndata.h5ad',  # Will be set when saving
-        'celltypes': adata.obs['celltype'].unique().tolist() if 'celltype' in adata.obs.columns else []
-    }
-    
-    # Build cell type index mapping
-    celltypes_to_index = {}
-    if 'celltype' in adata.obs.columns:
-        for ci, cellt in enumerate(adata.obs['celltype'].unique()):
-            celltypes_to_index[cellt] = ci
-    
-    # Handle center_celltypes
-    center_celltypes_parsed = parse_center_celltypes(center_celltypes)
-    
-    # Handle inject_feature
-    if inject_feature is not None and inject_feature.lower() == "none":
-        inject_feature = None
-    
-    # Create a temporary file path (will be set when actually saving)
-    file_path = "temp_anndata.h5ad"
-    
-    return config, file_path, celltypes_to_index
+    return train_mouse_ids, test_mouse_ids
