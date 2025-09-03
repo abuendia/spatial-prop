@@ -53,7 +53,7 @@ def propagate_perturbation (adata, method='distribution', temper=0.05):
     return (adata)
 	
 	
-def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temper=0.05):
+def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renormalize", temper=0.05):
     '''
     Compute the perturbed gene expression given:
         true_expn - array (cell x gene) of true unperturbed expression
@@ -63,15 +63,48 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
     Returns:
         true_perturb_expn - array (cell x gene) of perturbed expression
     '''
-    if method == "prediction_delta":
+    def renorm_expression (s, p_hat):
+        row_norm = torch.sum(s, dim=1) / torch.sum(p_hat, dim=1)
+        p = p_hat * row_norm.unsqueeze(1)
+        return (p)
+    
+    if method == "none":
+        
+        # pass in raw predictions
+        true_perturb_expn = pred_perturb_expn
+    
+    elif method == "prediction_delta":
         
         # computes effect of perturbation in prediction space
         diff = pred_perturb_expn - pred_expn
         diff[torch.abs(diff) < torch.quantile(torch.abs(diff), 0.9)] = 0 # clip to top 10%
         true_perturb_expn = true_expn + diff
     
-    
     elif method == "distribution":
+        
+        # computes prediction error distribution to calibrate
+        errors = true_expn - pred_expn
+        
+        # compute quantiles of error distribution
+        percentile_cutoff_top = torch.quantile(errors, 1-temper, axis=0)
+        percentile_cutoff_bottom = torch.quantile(errors, temper, axis=0)
+        
+        # get perturbation mask based on cutoffs (same gene)
+        pred_perturb_delta = true_expn - pred_perturb_expn
+        perturb_mask = torch.logical_or((percentile_cutoff_top < pred_perturb_delta), (percentile_cutoff_bottom > pred_perturb_delta))
+        
+        # further mask so that perturbation must be greater magnitude than prediction error (same gene, same cell)
+        perturb_mask = torch.logical_and(perturb_mask, torch.abs(pred_perturb_delta) > torch.abs(errors))
+        
+        # further mask to remove negative values (i.e. left piecewise converts all negatives to zero)
+        perturb_mask = torch.logical_and(perturb_mask, pred_perturb_expn >= 0)
+        
+        # mask perturbations
+        true_perturb_expn = true_expn.clone()
+        true_perturb_expn[perturb_mask] = pred_perturb_expn[perturb_mask]
+    
+    
+    elif method == "distribution_dampen":
         
         # computes prediction error distribution to calibrate
         errors = true_expn - pred_expn
@@ -104,6 +137,49 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
         # mask perturbations
         true_perturb_expn = true_expn.clone()
         true_perturb_expn[perturb_mask] = calibrated_perturb_expn[perturb_mask]
+    
+    
+    elif method == "distribution_renormalize":
+        
+        # computes prediction error distribution to calibrate
+        errors = true_expn - pred_expn
+        
+        # compute quantiles of error distribution
+        percentile_cutoff_top = torch.quantile(errors, 1-temper, axis=0)
+        percentile_cutoff_bottom = torch.quantile(errors, temper, axis=0)
+        
+        # get perturbation mask based on cutoffs (same gene)
+        pred_perturb_delta = true_expn - pred_perturb_expn
+        perturb_mask = torch.logical_or((percentile_cutoff_top < pred_perturb_delta), (percentile_cutoff_bottom > pred_perturb_delta))
+        
+        # further mask so that perturbation must be greater magnitude than prediction error (same gene, same cell)
+        perturb_mask = torch.logical_and(perturb_mask, torch.abs(pred_perturb_delta) > torch.abs(errors))
+        
+        # further mask to remove negative values
+        perturb_mask = torch.logical_and(perturb_mask, pred_perturb_expn >= 0)
+        
+        # mask perturbations
+        true_perturb_expn = true_expn.clone()
+        true_perturb_expn[perturb_mask] = pred_perturb_expn[perturb_mask]
+        
+        # compute renormalization
+        true_perturb_expn = renorm_expression(true_expn, true_perturb_expn)
+        
+        
+    elif method == "renormalize":
+        
+        # further mask to remove negative values
+        perturb_mask = pred_perturb_expn >= 0
+        
+        # mask perturbations
+        true_perturb_expn = true_expn.clone()
+        true_perturb_expn[perturb_mask] = pred_perturb_expn[perturb_mask]
+        
+        # compute renormalization
+        true_perturb_expn = renorm_expression(true_expn, true_perturb_expn)
+        
+    else:
+        raise Exception ("temper method not recognized")
         
     return (true_perturb_expn)
 	
