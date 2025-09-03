@@ -1,39 +1,21 @@
-# import key packages and libraries
 import numpy as np
 import pandas as pd
 import scanpy as sc
 import squidpy as sq
 import anndata as ad
-from scipy.stats import pearsonr, spearmanr, ttest_ind
-import pickle
 import os
-from sklearn.neighbors import BallTree
-
-from scipy.stats import mannwhitneyu, ttest_ind
 from scipy.sparse import issparse
-from statsmodels.stats.multitest import multipletests
-from decimal import Decimal
-
+import pickle
 import random
-
-from ageaccel_proximity import *
-
-import networkx as nx
 
 import torch
 from torch_geometric.data import Data, Dataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
+from torch_geometric.utils import k_hop_subgraph, one_hot
 from torch_geometric.utils.convert import from_scipy_sparse_matrix
-from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
-from torch.nn.modules.loss import _Loss
-from torch.distributions import MultivariateNormal as MVN
 import json
 
+from spatial_gnn.scripts.ageaccel_proximity import *
 
-# Dataset Class
 
 class SpatialAgingCellDataset(Dataset):
     '''
@@ -110,7 +92,9 @@ class SpatialAgingCellDataset(Dataset):
                                      'T cell' : 16, 
                                      'B cell' : 17,
                                     },
-                 embedding_json=None
+                 embedding_json=None,
+                 genept_embeddings_path=None,
+                 perturbation_mask_key="perturbation_mask"
                 ):
     
         self.root=root
@@ -138,15 +122,75 @@ class SpatialAgingCellDataset(Dataset):
         self._indices = None
         self.embedding_json = embedding_json
         self.cell_embeddings = None
+        self.perturbation_mask_key=perturbation_mask_key
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
                 self.cell_embeddings = json.load(f)
             # Convert all embeddings to np.array for efficient stacking
             for k in self.cell_embeddings:
                 self.cell_embeddings[k] = np.array(self.cell_embeddings[k], dtype=np.float32)
+        
+        # Load GenePT embeddings if provided
+        self.genept_embeddings_path = genept_embeddings_path
+        self.genept_embeddings = None
+        if genept_embeddings_path is not None:
+            print(f"Loading GenePT embeddings from {genept_embeddings_path}")
+            with open(genept_embeddings_path, 'rb') as f:
+                self.genept_embeddings = pickle.load(f)
+            # Convert all embeddings to np.array for efficient stacking
+            for k in self.genept_embeddings:
+                self.genept_embeddings[k] = np.array(self.genept_embeddings[k], dtype=np.float32)
+            print(f"Loaded {len(self.genept_embeddings)} GenePT embeddings")
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
+    
+    def _combine_expression_with_genept(self, expression_matrix, gene_names):
+        """
+        Combine raw expression values with GenePT embeddings.
+        
+        For each gene, multiply the raw expression value by the corresponding GenePT embedding.
+        This creates a feature vector that combines expression magnitude with semantic gene information.
+        
+        Parameters:
+        -----------
+        expression_matrix : np.ndarray
+            Expression matrix (cells x genes)
+        gene_names : np.ndarray
+            Gene names corresponding to the expression matrix
+            
+        Returns:
+        --------
+        np.ndarray
+            Combined features matrix (cells x (genes * embedding_dim))
+        """
+        if self.genept_embeddings is None:
+            return expression_matrix
+        
+        # Get embedding dimension
+        emb_dim = len(next(iter(self.genept_embeddings.values())))
+        
+        # Initialize output matrix
+        n_cells, n_genes = expression_matrix.shape
+        combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
+        
+        # For each gene, combine expression with embedding
+        for i, gene_name in enumerate(gene_names):
+            # Convert gene name to uppercase for lookup
+            gene_name_upper = gene_name.upper()
+            if gene_name_upper in self.genept_embeddings:
+                # Get the GenePT embedding for this gene
+                gene_embedding = self.genept_embeddings[gene_name_upper]
+                
+                # Multiply expression values by the embedding
+                # This creates a feature vector where each element is expression * embedding_dim
+                for j in range(emb_dim):
+                    combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
+            else:
+                # If gene not in embeddings, use zeros for that gene's embedding dimensions
+                combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
+        
+        return combined_features
     
     @property
     def processed_dir(self) -> str:
@@ -155,7 +199,11 @@ class SpatialAgingCellDataset(Dataset):
         else:
             aug_key = int(self.augment_cutoff*100)
         celltype_firstletters = "".join([x[0] for x in self.center_celltypes])
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
+        
+        # Add GenePT indicator to directory name if embeddings are used
+        genept_suffix = "_GenePT" if self.genept_embeddings is not None else ""
+        
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
@@ -199,7 +247,10 @@ class SpatialAgingCellDataset(Dataset):
         # read in genes
         gene_names = self.gene_names
         
-        # save genes
+        # Convert gene names to uppercase for consistency
+        gene_names = np.array([gene.upper() for gene in gene_names])
+        
+        # save genes (already converted to uppercase)
         if self.subfolder_name is not None:
             genefn = self.processed_dir.split("/")[-2]
         else:
@@ -234,6 +285,10 @@ class SpatialAgingCellDataset(Dataset):
             # order by gene_names
             adata = adata[:, gene_names]
             
+            # Convert all gene names to uppercase for consistency
+            adata.var_names = [gene.upper() for gene in adata.var_names]
+            gene_names = np.array([gene.upper() for gene in gene_names])
+            
             # make and save subgraphs
             subgraph_count = 0
             
@@ -263,17 +318,53 @@ class SpatialAgingCellDataset(Dataset):
                 if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
                     raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
                 
+                # Check if perturbation mask exists and use it for expression features
+                use_perturbation_expression = False
+                if self.perturbation_mask_key in sub_adata.obs.keys():
+                    use_perturbation_expression = True
+                    print(f"Using perturbation mask from {self.perturbation_mask_key}")
+                
                 if "celltype" in self.node_feature:
                     # get cell type one hot encoding
                     node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
                     node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
                 
                 if "expression" in self.node_feature:
-                    # get spatial expression
-                    if self.node_feature == "expression":
-                        node_labels = torch.tensor(sub_adata.X).float()
+                    # get spatial expression - use perturbation mask if available
+                    if use_perturbation_expression:
+                        # Use perturbation mask values instead of original expression
+                        perturbation_expression = np.array([sub_adata.obs[self.perturbation_mask_key].iloc[i] for i in range(sub_adata.shape[0])])
+                        
+                        # Reshape to match gene dimensions if needed
+                        if len(perturbation_expression.shape) == 1:
+                            # Single value per cell, expand to match gene dimensions
+                            perturbation_expression = np.tile(perturbation_expression[:, np.newaxis], (1, sub_adata.shape[1]))
+                        
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(perturbation_expression).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(perturbation_expression).float()), 1).float()
                     else:
-                        node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
+                        # Use original expression values
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(sub_adata.X).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
+                    
+                    # Combine with GenePT embeddings if available
+                    if self.genept_embeddings is not None:
+                        if use_perturbation_expression:
+                            # Use perturbation expression for GenePT combination
+                            genept_augmented_features = self._combine_expression_with_genept(perturbation_expression, sub_adata.var_names)
+                        else:
+                            # Use original expression for GenePT combination
+                            genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
+                        
+                        if self.node_feature == "expression":
+                            node_labels = torch.tensor(genept_augmented_features).float()
+                        else:
+                            node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
+                    
                     # add missing gene indicators where == -1
                     #node_labels = torch.cat((node_labels, torch.tensor((sub_adata.X==-1).astype(float))), 1).float()
                 
@@ -317,6 +408,7 @@ class SpatialAgingCellDataset(Dataset):
                 
                 graph_labels = [] # for computing quantiles later
                 for cidx in cell_idxs:
+                    cidx = int(cidx)
                     # get subgraph
                     sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
                     
@@ -345,7 +437,9 @@ class SpatialAgingCellDataset(Dataset):
                                                  region = subgraph_region,
                                                  age = subgraph_age,
                                                  condition = subgraph_cond,
-                                                 dataset = raw_filepath)
+                                                 dataset = raw_filepath, 
+                                                 original_cell_idx = cidx,
+                                                 original_cell_id = sub_adata.obs_names[cidx])
                         else:
                             subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
@@ -357,7 +451,9 @@ class SpatialAgingCellDataset(Dataset):
                                              age = subgraph_age,
                                              condition = subgraph_cond,
                                              inject = injected_labels,
-                                             dataset = raw_filepath) 
+                                             dataset = raw_filepath, 
+                                             original_cell_idx = cidx,
+                                             original_cell_id = sub_adata.obs_names[cidx])
 
                         # save object
                         torch.save(subgraph_data,
@@ -390,10 +486,10 @@ class SpatialAgingCellDataset(Dataset):
                         absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
 
                     # get subgraphs and save for augmentation
-                    for cidx in augment_idxs:
-                                            
+                    for cidx in augment_idxs:               
                         # get subgraph
-                        sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
+                        cidx = int(cidx)
+                        sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(cidx, edge_index, node_labels, sub_adata)
                                             
                         # augmentation selection conditions
                         if self.augment_cutoff == "auto": # probabilistic
@@ -424,7 +520,9 @@ class SpatialAgingCellDataset(Dataset):
                                                      region = subgraph_region,
                                                      age = subgraph_age,
                                                      condition = subgraph_cond,
-                                                     dataset = raw_filepath)
+                                                     dataset = raw_filepath, 
+                                                     original_cell_idx = cidx,
+                                                     original_cell_id = sub_adata.obs_names[cidx])
                             else:
                                 subgraph_data = Data(x = sub_node_labels,
                                                      edge_index = sub_edge_index,
@@ -436,7 +534,9 @@ class SpatialAgingCellDataset(Dataset):
                                                      age = subgraph_age,
                                                      condition = subgraph_cond,
                                                      inject = injected_labels,
-                                                     dataset = raw_filepath)
+                                                     dataset = raw_filepath, 
+                                                     original_cell_idx = cidx,
+                                                     original_cell_id = sub_adata.obs_names[cidx])
 
                             # save object
                             torch.save(subgraph_data,
@@ -495,249 +595,3 @@ class SpatialAgingCellDataset(Dataset):
     def get(self, idx):
         data = torch.load(os.path.join(self.processed_dir, f'g{idx}.pt'), weights_only=False)
         return data
-		
-
-# Model class
-
-class GNN(torch.nn.Module):
-    def __init__(self, hidden_channels, input_dim, output_dim=1, inject_dim=0,
-                 num_layers=3, method="GCN", pool="add"):
-        super(GNN, self).__init__()
-        torch.manual_seed(444)
-        
-        self.method = method
-        self.pool = pool
-        
-        if self.method == "GCN":
-            self.conv1 = GCNConv(input_dim, hidden_channels)
-            self.convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
-        
-        elif self.method == "GIN":
-            self.conv1 = GINConv(
-                            Sequential(
-                                Linear(input_dim, hidden_channels),
-                                BatchNorm1d(hidden_channels),
-                                ReLU(),
-                                Linear(hidden_channels, hidden_channels)
-                            )
-                          )
-            self.convs = ModuleList([GINConv(
-                            Sequential(
-                                Linear(hidden_channels, hidden_channels),
-                                BatchNorm1d(hidden_channels),
-                                ReLU(),
-                                Linear(hidden_channels, hidden_channels)
-                            )
-                          ) for _ in range(num_layers - 1)])
-        
-        elif self.method == "SAGE":
-            self.conv1 = SAGEConv(input_dim, hidden_channels)
-            self.convs = ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
-            
-        else:
-            raise Exception("'method' not recognized.")
-        
-        self.lin = Linear(hidden_channels+inject_dim, output_dim)
-
-    def forward(self, x, edge_index, batch, inject=None):
-                    
-        # node embeddings 
-        x = F.relu(self.conv1(x, edge_index))
-        for layer_idx, conv in enumerate(self.convs):
-            if layer_idx < len(self.convs) - 1:
-                x = F.relu(conv(x, edge_index))
-            else:
-                x = conv(x, edge_index)
-
-        # pooling and readout
-        if self.pool == "mean":
-            x = global_mean_pool(x, batch)
-        elif self.pool == "add":
-            x = global_add_pool(x, batch)
-        elif self.pool == "max":
-            x = global_max_pool(x, batch)
-        else:
-            raise Exception ("'pool' not recognized")
-
-        # final prediction
-        x = F.dropout(x, p=0.1, training=self.training)
-        
-        if inject is None: # use only embedding to predict
-            x = self.lin(x)
-        else: # inject features at last layer
-            x = self.lin(torch.cat((x,inject),1))
-        
-        return x
-    
-
-def bmc_loss(pred, target, noise_var):
-    """Compute the Multidimensional Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
-    Args:
-      pred: A float tensor of size [batch, d].
-      target: A float tensor of size [batch, d].
-      noise_var: A float number or tensor.
-    Returns:
-      loss: A float tensor. Balanced MSE Loss.
-    """
-    # reshape target to pred shape -- added 6/25/2024
-    if target.shape != pred.shape:
-        target = torch.reshape(target, pred.shape)
-    
-    I = torch.eye(pred.shape[-1])
-    logits = MVN(pred.unsqueeze(1), noise_var*I).log_prob(target.unsqueeze(0))  # logit size: [batch, batch]
-    loss = F.cross_entropy(logits, torch.arange(pred.shape[0]))     # contrastive-like loss
-    loss = loss * (2 * noise_var).detach()  # optional: restore the loss scale, 'detach' when noise is learnable 
-    
-    return loss
-
-
-class BMCLoss(_Loss):
-    def __init__(self, init_noise_sigma):
-        super(BMCLoss, self).__init__()
-        self.noise_sigma = torch.nn.Parameter(torch.tensor(init_noise_sigma))
-
-    def forward(self, pred, target):
-        noise_var = self.noise_sigma ** 2
-        return bmc_loss(pred, target, noise_var)
-
-
-
-    
-# negative pearson correlation loss
-def npcc_loss(pred, target):
-    """
-    Negative pearson correlation as loss
-    """
-    
-    # Alternative formulation
-    x = torch.flatten(pred)
-    y = torch.flatten(target)
-    
-    mean_x = torch.mean(x)
-    mean_y = torch.mean(y)
-    xm = x.sub(mean_x)
-    ym = y.sub(mean_y)
-    r_num = xm.dot(ym)
-    r_den = torch.norm(xm, 2) * torch.norm(ym, 2)
-    r_val = r_num / r_den
-    
-    loss = 1-r_val
-
-    return loss
-    
-class Neg_Pearson_Loss(_Loss):
-    def __init__(self):
-        super(Neg_Pearson_Loss, self).__init__()
-        return
-
-    def forward(self, pred, target):
-        return npcc_loss(pred, target)
-
-
-
-
-def weighted_l1_loss(pred, target, zero_weight, nonzero_weight):
-
-    if target.shape != pred.shape:
-        target = torch.reshape(target, pred.shape)
-    
-    abs_diff = torch.abs(pred - target)
-    zero_mask = (target == 0).float()
-    nonzero_mask = (target != 0).float()
-    
-    loss = (zero_weight * zero_mask * abs_diff +
-            nonzero_weight * nonzero_mask * abs_diff)
-    
-    return loss.mean()
-
-class WeightedL1Loss(_Loss):
-    def __init__(self, zero_weight=1.0, nonzero_weight=1.0):
-        super(WeightedL1Loss, self).__init__()
-        self.zero_weight = zero_weight
-        self.nonzero_weight = nonzero_weight
-
-    def forward(self, predictions, targets):
-        
-        loss = weighted_l1_loss(predictions, targets, self.zero_weight, self.nonzero_weight)
-        
-        return loss
-
-
-
-
-
-
-def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
-    model.train()
-    
-    import time
-    start = time.time()
-    
-    
-    for data in loader:  # Iterate in batches over the training dataset.
-        
-        end = time.time()
-        # print(f"Data load time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        data.to(device)
-        
-        end = time.time()
-        # print(f"To cuda time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None)  # Perform a single forward pass.
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject) # Perform a single forward pass.
-        
-        end = time.time()
-        # print(f"Forward pass time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        loss = criterion(out, data.y)  # Compute the loss.
-        
-        end = time.time()
-        # print(f"Loss time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        loss.backward()  # Derive gradients.
-        optimizer.step()  # Update parameters based on gradients.
-        optimizer.zero_grad()  # Clear gradients.
-        
-        end = time.time()
-        # print(f"Backward pass time: {end - start}", flush=True)
-        
-        start = time.time()
-        
-        # print(data.x.device)
-        
-
-def test(model, loader, loss, criterion, inject=False, device="cuda"):
-    model.eval()
-
-    errors = []
-    for data in loader:  # Iterate in batches over the training/test dataset.
-        
-        data.to(device)
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None)
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject)
-        
-        if loss == "mse":
-            errors.append(F.mse_loss(out, data.y.unsqueeze(1)).sqrt().item())
-        elif loss == "l1":
-            errors.append(F.l1_loss(out, data.y.unsqueeze(1)).item())
-        elif loss == "weightedl1":
-            errors.append(weighted_l1_loss(out, data.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
-        elif loss == "balanced_mse":
-            errors.append(bmc_loss(out, data.y.unsqueeze(1), criterion.noise_sigma**2).item())
-        elif loss == "npcc":
-            errors.append(npcc_loss(out, data.y.unsqueeze(1)).item())
-        
-    return np.mean(errors)  # Derive ratio of correct predictions.
