@@ -6,10 +6,11 @@ import anndata as ad
 import os
 from scipy.sparse import issparse
 import pickle
+import random
 
 import torch
 from torch_geometric.data import Data, Dataset
-from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
+from torch_geometric.utils import k_hop_subgraph, one_hot
 from torch_geometric.utils.convert import from_scipy_sparse_matrix
 import json
 
@@ -202,7 +203,7 @@ class SpatialAgingCellDataset(Dataset):
         # Add GenePT indicator to directory name if embeddings are used
         genept_suffix = "_GenePT" if self.genept_embeddings is not None else ""
         
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}_{self.perturbation_mask_key}"
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:

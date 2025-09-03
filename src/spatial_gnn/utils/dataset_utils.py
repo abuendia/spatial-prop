@@ -262,7 +262,6 @@ def create_graphs_from_adata(
         center_celltypes=model_config["center_celltypes"],
         use_ids=model_config["test_ids"] if use_all_ids is False else None,
         raw_filepaths=[anndata_path],
-        gene_list=model_config["gene_list"],
         celltypes_to_index=model_config["celltypes_to_index"],
         normalize_total=model_config["normalize_total"],
         perturbation_mask_key=perturbation_mask_key

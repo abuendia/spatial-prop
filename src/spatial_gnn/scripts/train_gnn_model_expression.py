@@ -299,8 +299,8 @@ def train_model_from_scratch(
         "augment_hop": augment_hop,
         "center_celltypes": center_celltypes,
         "normalize_total": normalize_total,
-        "train_ids": train_ids.tolist(),
-        "test_ids": test_ids.tolist(),
+        "train_ids": train_ids,
+        "test_ids": test_ids,
         "data_file_path": file_path,
         "celltypes_to_index": celltypes_to_index,
         "num_cells_per_ct_id": num_cells_per_ct_id

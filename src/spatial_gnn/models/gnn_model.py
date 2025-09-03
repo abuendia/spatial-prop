@@ -217,7 +217,7 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
         
     return np.mean(errors)  # Derive ratio of correct predictions.
 
-def predict(model, dataloader, adata, device="cuda"):
+def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="perturbation_mask"):
     """
     Convert GNN model predictions back to AnnData format using the stored mapping info.
     
