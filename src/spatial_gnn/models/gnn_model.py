@@ -219,7 +219,7 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
 
 def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="perturbation_mask"):
     """
-    Convert GNN model predictions back to AnnData format using the stored mapping info.
+    Run GNN model predictions and convert back to AnnData format using the stored mapping info.
     
     Parameters:
     -----------

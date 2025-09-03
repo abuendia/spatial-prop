@@ -87,9 +87,23 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution", temp
         # further mask so that perturbation must be greater magnitude than prediction error (same gene, same cell)
         perturb_mask = torch.logical_and(perturb_mask, torch.abs(pred_perturb_delta) > torch.abs(errors))
         
+        # compute calibrated update to perturbation (i.e. right piecewise performs calibrated rescaling)
+        def get_p (s, p_hat):
+            L = get_L(s, p_hat)
+            p = (1-L)*s+L*p_hat
+            return(p)
+        def get_L (s, p_hat):
+            L = 1/(1+torch.log(torch.abs(s-p_hat)+1)) # logarithm decay of L from 1 to 0
+            return (L)
+        #calibrated_perturb_expn = true_expn + ((pred_perturb_expn - pred_expn) * ((1+true_expn)/(1+pred_expn)))
+        calibrated_perturb_expn = get_p(true_expn, pred_perturb_expn)
+        
+        # further mask to remove negative values (i.e. left piecewise converts all negatives to zero)
+        perturb_mask = torch.logical_and(perturb_mask, calibrated_perturb_expn >= 0)
+        
         # mask perturbations
         true_perturb_expn = true_expn.clone()
-        true_perturb_expn[perturb_mask] = pred_perturb_expn[perturb_mask]
+        true_perturb_expn[perturb_mask] = calibrated_perturb_expn[perturb_mask]
         
     return (true_perturb_expn)
 	

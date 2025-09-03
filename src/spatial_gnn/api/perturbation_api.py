@@ -135,11 +135,7 @@ def predict_perturbation_effects(
     This function supports two modes:
     1. **Training from scratch**: When model_path is None, train a new model from scratch
     2. **Inference with pretrained model**: When model_path is provided, load and use a pretrained model
-    
-    The function takes an AnnData object with perturbations specified either through:
-    1. A perturbation mask stored in adata.obsm[perturbation_mask_key] (preferred), OR
-    2. A list of perturbation specifications (legacy mode)
-    
+        
     The function uses a GNN model to predict the resulting changes in gene expression 
     across the spatial network.
     
