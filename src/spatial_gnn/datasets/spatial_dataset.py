@@ -15,7 +15,7 @@ from torch_geometric.utils import k_hop_subgraph, one_hot
 from torch_geometric.utils.convert import from_scipy_sparse_matrix
 import json
 
-from spatial_gnn.scripts.ageaccel_proximity import *
+from spatial_gnn.utils.graph_utils import build_spatial_graph
 
 
 class SpatialAgingCellDataset(Dataset):
@@ -676,29 +676,22 @@ class SpatialAgingCellDataset(Dataset):
         
         
         return (sub_node_labels, sub_edge_index, graph_label, center_node_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond)
-    
 
     def len(self):
         return len(self.processed_file_names)
 
     def get(self, idx):
-        # Handle both old individual files and new batched files
-        if os.path.exists(os.path.join(self.processed_dir, f'g{idx}.pt')):
-            # Old format - individual files
-            data = torch.load(os.path.join(self.processed_dir, f'g{idx}.pt'), weights_only=False)
-            return data
+        batch_idx = idx // self.batch_size 
+        batch_file = os.path.join(self.processed_dir, f'batch_{batch_idx}.pt')
+        if os.path.exists(batch_file):
+            # Original batch file
+            batch_data = torch.load(batch_file, weights_only=False)
+            return batch_data[idx % self.batch_size]
         else:
-            # New format - batched files
-            batch_idx = idx // self.batch_size 
-            batch_file = os.path.join(self.processed_dir, f'batch_{batch_idx}.pt')
-            if os.path.exists(batch_file):
-                batch_data = torch.load(batch_file, weights_only=False)
+            # Try augmentation batch files
+            aug_batch_file = os.path.join(self.processed_dir, f'aug_batch_{batch_idx}.pt')
+            if os.path.exists(aug_batch_file):
+                batch_data = torch.load(aug_batch_file, weights_only=False)
                 return batch_data[idx % self.batch_size]
             else:
-                # Try augmentation batch files
-                aug_batch_file = os.path.join(self.processed_dir, f'aug_batch_{batch_idx}.pt')
-                if os.path.exists(aug_batch_file):
-                    batch_data = torch.load(aug_batch_file, weights_only=False)
-                    return batch_data[idx % self.batch_size]
-                else:
-                    raise FileNotFoundError(f"Could not find data for index {idx}")
+                raise FileNotFoundError(f"Could not find data for index {idx}")
