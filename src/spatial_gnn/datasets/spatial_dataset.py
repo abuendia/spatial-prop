@@ -7,6 +7,7 @@ import os
 from scipy.sparse import issparse
 import pickle
 import random
+import time
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -94,7 +95,10 @@ class SpatialAgingCellDataset(Dataset):
                                     },
                  embedding_json=None,
                  genept_embeddings_path=None,
-                 perturbation_mask_key="perturbation_mask"
+                 perturbation_mask_key="perturbation_mask",
+                 batch_size=100,
+                 overwrite=True,
+                 debug=True,
                 ):
     
         self.root=root
@@ -123,6 +127,13 @@ class SpatialAgingCellDataset(Dataset):
         self.embedding_json = embedding_json
         self.cell_embeddings = None
         self.perturbation_mask_key=perturbation_mask_key
+        self.batch_size=batch_size
+        self.debug=debug
+        self.overwrite=overwrite
+
+        if self.debug:
+            self.use_ids = self.use_ids[:2]
+
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
                 self.cell_embeddings = json.load(f)
@@ -141,6 +152,13 @@ class SpatialAgingCellDataset(Dataset):
             for k in self.genept_embeddings:
                 self.genept_embeddings[k] = np.array(self.genept_embeddings[k], dtype=np.float32)
             print(f"Loaded {len(self.genept_embeddings)} GenePT embeddings")
+
+        if self.overwrite:
+            if os.path.exists(self.processed_dir):
+                print(f"Overwriting existing dataset at {self.processed_dir}")
+                os.system(f"rm -rf {self.processed_dir}")
+            else:
+                print(f"Creating new dataset at {self.processed_dir}")
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
@@ -230,12 +248,14 @@ class SpatialAgingCellDataset(Dataset):
         return gene_names
     
     def process(self):
+        total_start_time = time.time()
+        print(f"Starting dataset processing at {time.strftime('%H:%M:%S')}")
         
         # Create / overwrite directory
         if not os.path.exists(self.processed_dir):
             os.makedirs(self.processed_dir)
         else:
-            print ("Dataset already exists!")
+            print ("Dataset already exists at: ", self.processed_dir)
             return()
         
         # define augmentation
@@ -245,33 +265,46 @@ class SpatialAgingCellDataset(Dataset):
             aug_key = int(self.augment_cutoff*100)
             
         # read in genes
+        t1 = time.time()
         gene_names = self.gene_names
         
         # Convert gene names to uppercase for consistency
         gene_names = np.array([gene.upper() for gene in gene_names])
+        print(f"Gene processing: {time.time() - t1:.3f}s")
         
         # save genes (already converted to uppercase)
+        t1 = time.time()
         if self.subfolder_name is not None:
             genefn = self.processed_dir.split("/")[-2]
         else:
             genefn = self.processed_dir.split("/")[-1]
         pd.DataFrame(gene_names).to_csv(os.path.join(self.root,self.processed_folder_name,"gene_names",f"{genefn}.csv"), header=False, index=False)
+        print(f"Gene saving: {time.time() - t1:.3f}s")
         
         for rfi, raw_filepath in enumerate(self.raw_filepaths):
+            file_start_time = time.time()
+            print(f"\nProcessing file {rfi+1}/{len(self.raw_filepaths)}: {os.path.basename(raw_filepath)}")
             # load raw data
+            t1 = time.time()
             adata = sc.read_h5ad(raw_filepath)
             if issparse(adata.X):
                 adata.X = adata.X.toarray()
+            print(f"  File loading: {time.time() - t1:.3f}s")
             
             # filter to known cell type keys
+            t1 = time.time()
             adata = adata[adata.obs.celltype.isin(self.celltypes_to_index.keys())]
+            print(f"  Cell type filtering: {time.time() - t1:.3f}s")
             
             # normalize by total genes
+            t1 = time.time()
             if self.normalize_total is True:
-                print("Normalized data")
+                print("  Normalizing data")
                 sc.pp.normalize_total(adata, target_sum=adata.shape[1])
+            print(f"  Normalization: {time.time() - t1:.3f}s")
             
             # handle missing genes (-1 token, indicators added later)
+            t1 = time.time()
             missing_genes = [gene for gene in gene_names if gene not in adata.var_names]
             missing_X = -np.ones((adata.shape[0],len(missing_genes)))
             orig_obs_names = adata.obs_names.copy()
@@ -281,13 +314,16 @@ class SpatialAgingCellDataset(Dataset):
                                obsm = adata.obsm)
             adata.obs_names = orig_obs_names
             adata.var_names = np.concatenate((orig_var_names, missing_genes))
+            print(f"  Missing gene handling: {time.time() - t1:.3f}s")
             
             # order by gene_names
+            t1 = time.time()
             adata = adata[:, gene_names]
             
             # Convert all gene names to uppercase for consistency
             adata.var_names = [gene.upper() for gene in adata.var_names]
             gene_names = np.array([gene.upper() for gene in gene_names])
+            print(f"  Gene ordering: {time.time() - t1:.3f}s")
             
             # make and save subgraphs
             subgraph_count = 0
@@ -300,21 +336,30 @@ class SpatialAgingCellDataset(Dataset):
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
             else:
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids))
+            print(f"  Sample ID processing: {time.time() - t1:.3f}s")
+            print(f"  Processing {len(sub_ids_arr)} samples")
             
-            for sid in sub_ids_arr:
+            for sid_idx, sid in enumerate(sub_ids_arr):
+                sample_start_time = time.time()
+                print(f"    Sample {sid_idx+1}/{len(sub_ids_arr)}: {sid}")
 
                 # subset to each sample
+                t1 = time.time()
                 sub_adata = adata[(adata.obs[self.sub_id]==sid)]
+                print(f"      Sample subsetting: {time.time() - t1:.3f}s")
 
                 # Delaunay triangulation with pruning of > 200um distances
+                t1 = time.time()
                 build_spatial_graph(sub_adata, method="delaunay")
                 sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
                 sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
+                print(f"      Spatial graph building: {time.time() - t1:.3f}s")
 
-                # convert graphs to PyG format
                 edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
+                print(f"      PyG conversion: {time.time() - t1:.3f}s")
                 
                 ### Construct Node Labels
+                t1 = time.time()
                 if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
                     raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
                 
@@ -389,7 +434,10 @@ class SpatialAgingCellDataset(Dataset):
                 else:
                     emb_tensor = None
                 
+                print(f"      Node label construction: {time.time() - t1:.3f}s")
+                
                 ### Get Indices of Random Center Cells
+                t1 = time.time()
                 cell_idxs = []
                 
                 if self.center_celltypes == "all":
@@ -403,10 +451,16 @@ class SpatialAgingCellDataset(Dataset):
                                             np.min([self.num_cells_per_ct_id, np.sum(sub_adata.obs["celltype"]==ct)]),
                                             replace=False)
                     cell_idxs = np.concatenate((cell_idxs, idxs))
+                
+                print(f"      Center cell selection: {time.time() - t1:.3f}s")
+                print(f"      Selected {len(cell_idxs)} center cells")
 
                 ### Extract K-hop Subgraphs
+                t1 = time.time()
                 
                 graph_labels = [] # for computing quantiles later
+                subgraph_data_list = []
+                
                 for cidx in cell_idxs:
                     cidx = int(cidx)
                     # get subgraph
@@ -444,26 +498,36 @@ class SpatialAgingCellDataset(Dataset):
                             subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
                                              y = torch.tensor([graph_label]).flatten(), # flatten used to handle uni- and multi-variate targets
-                                             center_node = center_id,
-                                             center_celltype = subgraph_cct,
-                                             celltypes = subgraph_cts,
-                                             region = subgraph_region,
-                                             age = subgraph_age,
-                                             condition = subgraph_cond,
-                                             inject = injected_labels,
-                                             dataset = raw_filepath, 
-                                             original_cell_idx = cidx,
-                                             original_cell_id = sub_adata.obs_names[cidx])
+                                                 center_node = center_id,
+                                                 center_celltype = subgraph_cct,
+                                                 celltypes = subgraph_cts,
+                                                 region = subgraph_region,
+                                                 age = subgraph_age,
+                                                 condition = subgraph_cond,
+                                                 inject = injected_labels,
+                                                 dataset = raw_filepath, 
+                                                 original_cell_idx = cidx,
+                                                 original_cell_id = sub_adata.obs_names[cidx])
 
-                        # save object
-                        torch.save(subgraph_data,
-                                   os.path.join(self.processed_dir,f"g{subgraph_count}.pt"))
-                        subgraph_count += 1
+                        subgraph_data_list.append(subgraph_data)
+                
+                print(f"      Subgraph extraction: {time.time() - t1:.3f}s")
+                print(f"      Created {len(subgraph_data_list)} subgraphs")
+                
+                # Save subgraphs in batches
+                t1 = time.time()
+                batch_size = self.batch_size
+                for i in range(0, len(subgraph_data_list), batch_size):
+                    batch = subgraph_data_list[i:i+batch_size]
+                    torch.save(batch, os.path.join(self.processed_dir, f"batch_{subgraph_count//batch_size}.pt"))
+                    subgraph_count += len(batch)
+                print(f"      Subgraph saving: {time.time() - t1:.3f}s")
                         
                 ### Selective Graph Augmentation
                 
                 # get augmentation indices
                 if self.augment_hop > 0:
+                    t1 = time.time()
                     augment_idxs = []
                     for cidx in cell_idxs:
                         # get subgraph and get node indices of all nodes
@@ -484,13 +548,19 @@ class SpatialAgingCellDataset(Dataset):
                         bins = np.concatenate((bins[0:1], bins, bins[-1:])) # expand edge bins with duplicate counts
                     else:
                         absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
+                    
+                    print(f"      Augmentation setup: {time.time() - t1:.3f}s")
 
-                    # get subgraphs and save for augmentation
+                                        # get subgraphs and save for augmentation
+                    t1 = time.time()
+                    augment_count = 0
+                    augment_data_list = []
+                    
                     for cidx in augment_idxs:               
                         # get subgraph
                         cidx = int(cidx)
                         sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(cidx, edge_index, node_labels, sub_adata)
-                                            
+                                        
                         # augmentation selection conditions
                         if self.augment_cutoff == "auto": # probabilistic
                             curr_bin = bins[np.digitize(graph_label,bin_edges)] # get freq of current bin
@@ -538,10 +608,29 @@ class SpatialAgingCellDataset(Dataset):
                                                      original_cell_idx = cidx,
                                                      original_cell_id = sub_adata.obs_names[cidx])
 
-                            # save object
-                            torch.save(subgraph_data,
-                                       os.path.join(self.processed_dir,f"g{subgraph_count}.pt"))
-                            subgraph_count += 1
+                            augment_data_list.append(subgraph_data)
+                            augment_count += 1
+                    
+                    # Save augmentation data in batches
+                    batch_size = self.batch_size
+                    for i in range(0, len(augment_data_list), batch_size):
+                        batch = augment_data_list[i:i+batch_size]
+                        torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{subgraph_count//batch_size}.pt"))
+                        subgraph_count += len(batch)
+                    
+                    print(f"      Augmentation processing: {time.time() - t1:.3f}s")
+                    print(f"      Created {augment_count} augmented subgraphs")
+                
+                sample_time = time.time() - sample_start_time
+                print(f"    Sample {sid} completed in {sample_time:.3f}s")
+            
+            file_time = time.time() - file_start_time
+            print(f"  File {os.path.basename(raw_filepath)} completed in {file_time:.3f}s")
+            print(f"  Total subgraphs created: {subgraph_count}")
+        
+        total_time = time.time() - total_start_time
+        print(f"\nDataset processing completed in {total_time:.3f}s ({total_time/60:.1f} minutes)")
+        print(f"Total subgraphs created: {subgraph_count}")
 
     
     def subgraph_from_index (self, cidx, edge_index, node_labels, sub_adata):
@@ -593,5 +682,23 @@ class SpatialAgingCellDataset(Dataset):
         return len(self.processed_file_names)
 
     def get(self, idx):
-        data = torch.load(os.path.join(self.processed_dir, f'g{idx}.pt'), weights_only=False)
-        return data
+        # Handle both old individual files and new batched files
+        if os.path.exists(os.path.join(self.processed_dir, f'g{idx}.pt')):
+            # Old format - individual files
+            data = torch.load(os.path.join(self.processed_dir, f'g{idx}.pt'), weights_only=False)
+            return data
+        else:
+            # New format - batched files
+            batch_idx = idx // self.batch_size 
+            batch_file = os.path.join(self.processed_dir, f'batch_{batch_idx}.pt')
+            if os.path.exists(batch_file):
+                batch_data = torch.load(batch_file, weights_only=False)
+                return batch_data[idx % self.batch_size]
+            else:
+                # Try augmentation batch files
+                aug_batch_file = os.path.join(self.processed_dir, f'aug_batch_{batch_idx}.pt')
+                if os.path.exists(aug_batch_file):
+                    batch_data = torch.load(aug_batch_file, weights_only=False)
+                    return batch_data[idx % self.batch_size]
+                else:
+                    raise FileNotFoundError(f"Could not find data for index {idx}")
