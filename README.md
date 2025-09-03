@@ -1,5 +1,12 @@
 # spatial-gnn: Predicting the spatial effects of single-cell genetic perturbations
 
+
+## Installation
+
+    conda env create -f environment.yml
+    conda activate spatial-gnn
+    pip install -e .
+
 ## Training GNN
 
     python scripts/train_gnn_model_expression.py \
