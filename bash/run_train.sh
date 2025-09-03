@@ -25,4 +25,4 @@ CUDA_VISIBLE_DEVICES=2 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --loss "weightedl1" \
     --epochs 50 \
     --debug \
-    --exp_name "aging_coronal"
+    --exp_name "aging_coronal_batched_time"

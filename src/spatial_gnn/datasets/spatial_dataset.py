@@ -97,7 +97,7 @@ class SpatialAgingCellDataset(Dataset):
                  genept_embeddings_path=None,
                  perturbation_mask_key="perturbation_mask",
                  batch_size=100,
-                 overwrite=True,
+                 overwrite=False,
                  debug=True,
                 ):
     

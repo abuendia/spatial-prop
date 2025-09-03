@@ -121,6 +121,7 @@ def predict_perturbation_effects(
     node_feature: str = "expression",
     inject_feature: str = "None",
     gene_list: Optional[str] = None,
+    num_cells_per_ct_id: int = 100,
     normalize_total: bool = True,
     learning_rate: float = 1e-4,
     loss: str = "mse",
@@ -228,8 +229,9 @@ def predict_perturbation_effects(
         # Train new model from scratch
         print("No model path provided. Training new model from scratch...")
         model, model_config, trained_model_path = train_model_from_scratch(
-            dataset=dataset,
-            base_path=base_path,
+            dataset="aging_coronal",
+            base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
+            adata_path=anndata_path,
             k_hop=k_hop,
             augment_hop=augment_hop,
             center_celltypes=center_celltypes,
@@ -240,6 +242,7 @@ def predict_perturbation_effects(
             epochs=epochs,
             gene_list=gene_list,
             normalize_total=normalize_total,
+            num_cells_per_ct_id=num_cells_per_ct_id,
             debug=debug,
             debug_subset_size=debug_subset_size,
             device=device
@@ -399,16 +402,19 @@ if __name__ == "__main__":
         'Pericyte': {'Ccl4': 0.5}    
     }
     # Create perturbation mask and get file path
-    adata_file_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
+    if not os.path.exists(save_path):
+        adata_file_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
+    else:
+        adata_file_path = save_path
     
-    # Example 1: Using pretrained model (inference mode)
-    # Params inferred from model config
-    print("=== Example 1: Using pretrained model ===")
-    adata_perturbed = predict_perturbation_effects(
-        anndata_path=adata_file_path,
-        model_path=model_path,
-        perturbation_mask_key="perturbation_mask"
-    )
+    # # Example 1: Using pretrained model (inference mode)
+    # # Params inferred from model config
+    # print("=== Example 1: Using pretrained model ===")
+    # adata_perturbed = predict_perturbation_effects(
+    #     anndata_path=adata_file_path,
+    #     model_path=model_path,
+    #     perturbation_mask_key="perturbation_mask"
+    # )
     
 
     training_params = {
@@ -418,26 +424,14 @@ if __name__ == "__main__":
         "node_feature": "expression",
         "inject_feature": "None",
         "debug": True,
-        "debug_subset_size": 50
+        "debug_subset_size": 50,
+        "num_cells_per_ct_id": 100
     }
-    # # Example 2: Training from scratch (training mode)
-    # print("\n=== Example 2: Training from scratch ===")
-    # adata_perturbed_trained = predict_perturbation_effects(
-    #     adata_file,  # Now this is a file path
-    #     model_path=None,  # No model path - trains new model
-    #     dataset="aging_coronal",
-    #     base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
-    #     k_hop=2,
-    #     augment_hop=2,
-    #     center_celltypes="T cell,NSC,Pericyte",
-    #     node_feature="expression",
-    #     inject_feature="None",
-    #     debug=True,
-    #     debug_subset_size=50,
-    #     learning_rate=1e-4,
-    #     loss="mse",
-    #     epochs=50  # Fewer epochs for demo
-    # )
+    adata_perturbed_trained = predict_perturbation_effects(
+        anndata_path=adata_file_path,
+        model_path=None,
+        perturbation_mask_key="perturbation_mask",
+        **training_params
+    )
     
-    # Visualize results from pretrained model
-    # visualize_perturbation_effects(adata_perturbed)
+    # Example 2: Training from scratch (training mode)

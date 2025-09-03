@@ -178,43 +178,44 @@ class WeightedL1Loss(_Loss):
 def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
     model.train()
 
-    for data in loader:  # Iterate in batches over the training dataset.
-        data.to(device)
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None)  # Perform a single forward pass.
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject) # Perform a single forward pass.
-        
-        loss = criterion(out, data.y)  # Compute the loss.
-                
-        loss.backward()  # Derive gradients.
-        optimizer.step()  # Update parameters based on gradients.
-        optimizer.zero_grad()  # Clear gradients.
-        
+    for data in loader:  
+        for batch in data:
+            batch.to(device)
+            if inject is False:
+                out = model(batch.x, batch.edge_index, batch.batch, None)  # Perform a single forward pass.
+            else:
+                out = model(batch.x, batch.edge_index, batch.batch, batch.inject) # Perform a single forward pass.
+            
+            loss = criterion(out, batch.y)  # Compute the loss.
+                    
+            loss.backward()  # Derive gradients.
+            optimizer.step()  # Update parameters based on gradients.
+            optimizer.zero_grad()  # Clear gradients.
+
 
 def test(model, loader, loss, criterion, inject=False, device="cuda"):
     model.eval()
 
     errors = []
-    for data in loader:  # Iterate in batches over the training/test dataset.
-        
-        data.to(device)
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None)
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject)
-        
-        if loss == "mse":
-            errors.append(F.mse_loss(out, data.y.unsqueeze(1)).sqrt().item())
-        elif loss == "l1":
-            errors.append(F.l1_loss(out, data.y.unsqueeze(1)).item())
-        elif loss == "weightedl1":
-            errors.append(weighted_l1_loss(out, data.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
-        elif loss == "balanced_mse":
-            errors.append(bmc_loss(out, data.y.unsqueeze(1), criterion.noise_sigma**2).item())
-        elif loss == "npcc":
-            errors.append(npcc_loss(out, data.y.unsqueeze(1)).item())
-        
+    for data in loader: 
+        for batch in data:
+            batch.to(device)
+            if inject is False:
+                out = model(batch.x, batch.edge_index, batch.batch, None)
+            else:
+                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
+            
+            if loss == "mse":
+                errors.append(F.mse_loss(out, batch.y.unsqueeze(1)).sqrt().item())
+            elif loss == "l1":
+                errors.append(F.l1_loss(out, batch.y.unsqueeze(1)).item())
+            elif loss == "weightedl1":
+                errors.append(weighted_l1_loss(out, batch.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
+            elif loss == "balanced_mse":
+                errors.append(bmc_loss(out, batch.y.unsqueeze(1), criterion.noise_sigma**2).item())
+            elif loss == "npcc":
+                errors.append(npcc_loss(out, batch.y.unsqueeze(1)).item())
+
     return np.mean(errors)  # Derive ratio of correct predictions.
 
 def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="perturbation_mask"):
@@ -248,28 +249,30 @@ def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="pert
     
     with torch.no_grad():
         for batch in dataloader:
-            batch.to(device)
-            
-            # Get predictions
-            if hasattr(batch, 'inject') and batch.inject is not None:
-                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
-            else:
-                out = model(batch.x, batch.edge_index, batch.batch, None)
-            
-            batch_predictions = out.cpu().numpy()
-            
-            # Map predictions back using stored information
-            for i, (pred, original_cell_idx, original_cell_id) in enumerate(zip(
-                batch_predictions, batch.original_cell_idx, batch.original_cell_id)):
+            for single_batch in batch:
+                single_batch.to(device)
                 
-                # Map predictions to the correct cell and genes
-                if len(pred) == n_genes:
-                    prediction_matrix[original_cell_idx, :] = pred
+                # Get predictions
+                if hasattr(single_batch, 'inject') and single_batch.inject is not None:
+                    out = model(single_batch.x, single_batch.edge_index, single_batch.batch, single_batch.inject)
                 else:
-                    raise ValueError(f"Warning: Prediction dimension {len(pred)} doesn't match genes {n_genes}")
+                    out = model(single_batch.x, single_batch.edge_index, single_batch.batch, None)
                 
-                predicted_cells.add(original_cell_idx)
-    
+                batch_predictions = out.cpu().numpy()
+                
+                for i, pred in enumerate(batch_predictions):
+                    original_cell_idx = single_batch.original_cell_idx[i].item()
+                    original_cell_id = single_batch.original_cell_id[i]
+                    
+                    # Map predictions to the correct cell and genes
+                    if len(pred) == n_genes:
+                        prediction_matrix[original_cell_idx, :] = pred
+                    else:
+                        print(f"Warning: Prediction dimension {len(pred)} doesn't match genes {n_genes}")
+                        prediction_matrix[original_cell_idx, :len(pred)] = pred[:n_genes]
+                    
+                    predicted_cells.add(original_cell_idx)
+
     # save in a new field in the anndata
     adata.layers['perturbation_effects'] = prediction_matrix
     print(f"Predicted {len(predicted_cells)} cells out of {n_cells} total cells")
