@@ -104,13 +104,8 @@ def create_perturbation_mask(
     return save_path
 
 
-def predict_perturbation_effects(
+def train_perturbation_model(
     adata_path: str,
-    model_path: Optional[str] = None,
-    perturbation_mask_key: str = 'perturbation_mask',
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    batch_size: int = 32,
-    dataset: Optional[str] = None,
     k_hop: int = 2,
     augment_hop: int = 2,
     center_celltypes: str = "all",
@@ -120,134 +115,139 @@ def predict_perturbation_effects(
     num_cells_per_ct_id: int = 100,
     normalize_total: bool = True,
     learning_rate: float = 1e-4,
-    loss: str = "mse",
+    loss: str = "weightedl1",
     epochs: int = 100,
     debug: bool = False,
     debug_subset_size: int = 100,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
     **kwargs
-) -> ad.AnnData:
+) -> Tuple[Any, Dict, str]:
     """
-    Predict the effects of perturbations on spatial transcriptomics data using a GNN model.
-    
-    This function supports two modes:
-    1. **Training from scratch**: When model_path is None, train a new model from scratch
-    2. **Inference with pretrained model**: When model_path is provided, load and use a pretrained model
-        
-    The function uses a GNN model to predict the resulting changes in gene expression 
-    across the spatial network.
+    Train a GNN model for perturbation prediction from scratch.
     
     Parameters
     ----------
-    adata : anndata.AnnData
-        AnnData object containing spatial transcriptomics data with:
-        - X: gene expression matrix (cells x genes)
-        - obs: cell metadata including spatial coordinates and cell types
-        - obsm: spatial coordinates (e.g., 'spatial') and optionally perturbation_mask
-        - var: gene metadata
-    
-    model_path : Optional[str], default=None
-        Path to the saved model state dictionary (.pth file). If None, train a new model from scratch.
-    
-    perturbation_mask_key : str, default='perturbation_mask'
-        Key in adata.obsm containing the perturbation mask (cells x genes matrix of multipliers)
-    
-    dataset : str
-        Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)
-    
-    base_path : str
-        Base path to the data directory
-    
-    k_hop : int
+    adata_path : str
+        Path to the training AnnData file (.h5ad)
+    k_hop : int, default=2
         k-hop neighborhood size
-    
-    augment_hop : int
-        number of hops to take for graph augmentation
-    
-    center_celltypes : str
-        cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering
-    
-    node_feature : str
-        node features key, e.g. 'celltype_age_region'
-    
-    inject_feature : str
-        inject features key, e.g. 'center_celltype'
-    
+    augment_hop : int, default=2
+        Number of hops for graph augmentation
+    center_celltypes : str, default="all"
+        Cell types to center graphs on (comma-separated or "all")
+    node_feature : str, default="expression"
+        Node feature type
+    inject_feature : str, default="None"
+        Feature injection type
     gene_list : Optional[str], default=None
-        Path to file containing list of genes to use (optional)
-    
+        Path to gene list file
+    num_cells_per_ct_id : int, default=100
+        Number of cells per cell type per ID
     normalize_total : bool, default=True
         Whether to normalize total gene expression
+    learning_rate : float, default=1e-4
+        Learning rate for training
+    loss : str, default="weightedl1"
+        Loss function type
+    epochs : int, default=100
+        Number of training epochs
+    debug : bool, default=False
+        Enable debug mode
+    debug_subset_size : int, default=100
+        Number of cells for debug mode
+    device : str, default="cuda" if available else "cpu"
+        Device to run training on
+        
+    Returns
+    -------
+    Tuple[Any, Dict, str]
+        (trained_model, model_config, model_path)
+    """
+    print("Training new perturbation model from scratch...")
+    model, model_config, trained_model_path = train_model_from_scratch(
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        center_celltypes=center_celltypes,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        learning_rate=learning_rate,
+        loss=loss,
+        epochs=epochs,
+        num_cells_per_ct_id=num_cells_per_ct_id,
+        adata_path=adata_path,
+        gene_list=gene_list,
+        normalize_total=normalize_total,
+        debug=debug,
+        debug_subset_size=debug_subset_size,
+        device=device
+    )
+    print(f"Training completed. Model saved to: {trained_model_path}")
+    return model, model_config, trained_model_path
+
+
+def predict_perturbation_effects(
+    adata_path: str,
+    model_path: str,
+    perturbation_dict: Dict[str, Dict[str, float]],
+    perturbation_mask_key: str = 'perturbation_mask',
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    **kwargs
+) -> ad.AnnData:
+    """
+    Predict the effects of perturbations on spatial transcriptomics data using a trained GNN model.
     
+    This function loads a pretrained model and applies perturbations to predict their effects
+    on gene expression across the spatial network.
+    
+    Parameters
+    ----------
+    adata_path : str
+        Path to the test AnnData file (.h5ad) containing spatial transcriptomics data
+    model_path : str
+        Path to the saved model state dictionary (.pth file)
+    perturbation_dict : Dict[str, Dict[str, float]]
+        Dictionary specifying perturbations:
+        - Keys: cell type names
+        - Values: dictionaries with gene names as keys and multipliers as values
+        Example: {'T cell': {'Igf2': 0.0}, 'NSC': {'Sox9': 2.0}}
+    perturbation_mask_key : str, default='perturbation_mask'
+        Key to store the perturbation mask in adata.obsm
     device : str, default="cuda" if available else "cpu"
         Device to run the model on
-    
-    batch_size : int, default=32
-        Batch size for processing
-    
-    debug : bool, default=False
-        Enable debug mode with subset of data for quick testing
-    
-    debug_subset_size : int, default=100
-        Number of cells to use in debug mode
-    
-    learning_rate : float, default=1e-4
-        Learning rate for training (used when model_path is None)
-    
-    loss : str, default="mse"
-        Loss function for training: "mse", "l1", "weightedl1", "balanced_mse", "npcc" (used when model_path is None)
-    
-    epochs : int, default=100
-        Number of training epochs (used when model_path is None)
-    
     **kwargs
-        Additional arguments passed to SpatialAgingCellDataset
+        Additional arguments (for compatibility)
     
     Returns
     -------
     anndata.AnnData
-        Updated AnnData object with new layers:
-        - 'predicted_original': Original predictions without perturbations
-        - 'predicted_perturbed': Predictions with perturbations applied
-        - 'perturbation_effects': Difference between perturbed and original predictions
-        - 'perturbation_mask': Boolean mask indicating which cells were perturbed
+        Updated AnnData object with perturbation effects stored in:
+        - adata.layers['perturbation_effects']: Predicted perturbation effects
+        - adata.obsm[perturbation_mask_key]: Applied perturbation mask
     """
     # Validate inputs
-    if adata_path is not None and not isinstance(adata_path, str):
-        raise TypeError("adata_path must be a string or None")
-    if model_path is not None and not isinstance(model_path, str):
-        raise TypeError("model_path must be a string or None")
+    if not isinstance(adata_path, str):
+        raise TypeError("adata_path must be a string")
+    if not isinstance(model_path, str):
+        raise TypeError("model_path must be a string")
+    if not isinstance(perturbation_dict, dict):
+        raise TypeError("perturbation_dict must be a dictionary")
         
-    # Handle model loading/training
-    if model_path is not None:
-        model, model_config = load_model_from_path(model_path, device)
-        print(f"Loaded pretrained model from: {model_path}")
-    else:
-        # Train new model from scratch
-        print("No model path provided. Training new model from scratch...")
-        model, model_config, trained_model_path = train_model_from_scratch(
-            k_hop=k_hop,
-            augment_hop=augment_hop,
-            center_celltypes=center_celltypes,
-            node_feature=node_feature,
-            inject_feature=inject_feature,
-            learning_rate=learning_rate,
-            loss=loss,
-            epochs=epochs,
-            num_cells_per_ct_id=num_cells_per_ct_id,
-            adata_path=adata_path,
-            gene_list=gene_list,
-            normalize_total=normalize_total,
-            debug=debug,
-            debug_subset_size=debug_subset_size,
-            device=device
-        )
-        print(f"Training completed. Model saved to: {trained_model_path}")
-
+    # Load the pretrained model
+    model, model_config = load_model_from_path(model_path, device)
+    print(f"Loaded pretrained model from: {model_path}")
+    
+    # Load the test data
+    adata = sc.read_h5ad(adata_path)
+    
+    # Create perturbation mask and apply it to the data
+    print("Creating perturbation mask...")
+    create_perturbation_mask(adata, perturbation_dict, mask_key=perturbation_mask_key)
+    
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
     inference_dataset = SpatialAgingCellDataset(
         subfolder_name="predict",
-        dataset_prefix=dataset if dataset is not None else "temp",
+        dataset_prefix="temp",
         target="expression",
         k_hop=model_config["k_hop"],
         augment_hop=model_config["augment_hop"],
@@ -268,7 +268,7 @@ def predict_perturbation_effects(
     for f in inference_dataset.processed_file_names:
         all_inference_data.append(torch.load(os.path.join(inference_dataset.processed_dir, f), weights_only=False))
     
-    inference_dataloader = DataLoader(all_inference_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    inference_dataloader = DataLoader(all_inference_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
     print(f"Created {len(all_inference_data)} batch files from input data")
 
     # Run model predict function
@@ -401,46 +401,39 @@ def visualize_perturbation_effects(
 
 
 if __name__ == "__main__":
-    data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
-    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed/aging_coronal_perturbed.h5ad"
-
-    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/aging_coronal_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_TNP_NoneInject/DEBUG_weightedl1_1en04/best_model.pth"
+    train_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
+    test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"  # Using same data for demo
     
-    adata = sc.read_h5ad(data_path)
-    
+    # Define perturbations
     perturbation_dict = {
         'T cell': {'Igf2': 0.0},  
         'NSC': {'Sox9': 2.0},         
         'Pericyte': {'Ccl4': 0.5}    
     }
-    # Create perturbation mask and get file path
-    if not os.path.exists(save_path):
-        perturbed_adata_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
-    else:
-        perturbed_adata_path = save_path
-
-    print("=== Example 1: Using pretrained model ===")
+    
+    # Example 1: Train a new model
+    print("=== Training a new perturbation model ===")
+    model, model_config, model_path = train_perturbation_model(
+        adata_path=train_data_path,
+        k_hop=2,
+        augment_hop=2,
+        center_celltypes="T cell,NSC,Pericyte",
+        node_feature="expression",
+        inject_feature="None",
+        debug=True,
+        debug_subset_size=10,
+        num_cells_per_ct_id=100,
+        epochs=10,
+    )
+    
+    # Example 2: Use the trained model to predict perturbation effects
+    print("\n=== Predicting perturbation effects ===")
     adata_perturbed = predict_perturbation_effects(
-        adata_path=perturbed_adata_path,
+        adata_path=test_data_path,
         model_path=model_path,
+        perturbation_dict=perturbation_dict,
         perturbation_mask_key="perturbation_mask"
     )
     
-    # training_params = {
-    #     "k_hop": 2,
-    #     "augment_hop": 2,
-    #     "center_celltypes": "T cell,NSC,Pericyte",
-    #     "node_feature": "expression",
-    #     "inject_feature": "None",
-    #     "debug": True,
-    #     "debug_subset_size": 10,
-    #     "num_cells_per_ct_id": 100,
-    #     "epochs": 10,
-    # }
-    # adata_perturbed_trained = predict_perturbation_effects(
-    #     adata_path=adata_file_path,
-    #     model_path=None,
-    #     perturbation_mask_key="perturbation_mask",
-    #     **training_params
-    # )
+    print(f"Prediction completed! Results stored in adata.layers['perturbation_effects']")
     
