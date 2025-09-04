@@ -304,7 +304,7 @@ def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
         'max_effect': np.max(effects, axis=0),
         'min_effect': np.min(effects, axis=0),
         'median_effect': np.median(effects, axis=0),
-        'num_perturbed_cells': np.sum(adata.obs.get('perturbation_mask', False))
+        'num_perturbed_cells': np.sum(effects != 0)
     }
     
     # Create DataFrame
@@ -411,7 +411,6 @@ if __name__ == "__main__":
         'Pericyte': {'Ccl4': 0.5}    
     }
     
-    # Example 1: Train a new model
     print("=== Training a new perturbation model ===")
     model, model_config, model_path = train_perturbation_model(
         adata_path=train_data_path,
@@ -426,14 +425,21 @@ if __name__ == "__main__":
         epochs=10,
     )
     
-    # Example 2: Use the trained model to predict perturbation effects
+    test_adata = sc.read_h5ad(test_data_path)
+    test_data_path_perturbed = create_perturbation_mask(test_adata, perturbation_dict, save_path=test_data_path)
+
     print("\n=== Predicting perturbation effects ===")
     adata_perturbed = predict_perturbation_effects(
-        adata_path=test_data_path,
+        adata_path=test_data_path_perturbed,
         model_path=model_path,
         perturbation_dict=perturbation_dict,
         perturbation_mask_key="perturbation_mask"
     )
     
-    print(f"Prediction completed! Results stored in adata.layers['perturbation_effects']")
+    print("=== Visualizing perturbation effects ===")
+    visualize_perturbation_effects(adata_perturbed)
+    
+    print("=== Getting perturbation summary ===")
+    perturbation_summary = get_perturbation_summary(adata_perturbed)
+    print(perturbation_summary)
     

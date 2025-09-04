@@ -1,5 +1,6 @@
 import numpy as np
 from tqdm import tqdm
+from scipy.sparse import issparse
 
 import torch
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
@@ -292,12 +293,18 @@ def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="pert
 
     # Final summary
     print(f"\n=== FINAL SUMMARY ===")
-    print(f"Total time: {time.time() - total_start_time:.3f}s ({time.time() - total_start_time/60:.1f} minutes)")
+    print(f"Total time: {time.time() - total_start_time:.3f}s")
     print(f"Processed {batch_count} batches")
     print(f"Average time per batch: {time.time() - total_start_time/batch_count:.3f}s")
 
-    # save in a new field in the anndata
-    adata.layers['perturbation_effects'] = prediction_matrix
+    # Calculate perturbation effects as difference between predicted and original
+    original_expression = adata.X.toarray() if issparse(adata.X) else adata.X
+    perturbation_effects = prediction_matrix - original_expression
+    
+    # Save both predicted values and perturbation effects
+    adata.layers['predicted_perturbed'] = prediction_matrix
+    adata.layers['perturbation_effects'] = perturbation_effects
     print(f"Predicted {len(predicted_cells)} cells out of {n_cells} total cells")
+    print(f"Perturbation effects calculated as: predicted - original")
     
     return adata
