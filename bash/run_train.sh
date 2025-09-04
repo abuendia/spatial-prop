@@ -23,6 +23,6 @@ CUDA_VISIBLE_DEVICES=2 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --inject_feature "none" \
     --learning_rate 0.0001 \
     --loss "weightedl1" \
-    --epochs 50 \
+    --epochs 10 \
     --debug \
     --exp_name "aging_coronal_batched_time"

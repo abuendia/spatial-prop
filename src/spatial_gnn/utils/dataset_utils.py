@@ -6,14 +6,7 @@ import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
 import anndata as ad
-import scanpy as sc
-from torch_geometric.data import Data, Dataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
 from spatial_gnn.models.gnn_model import GNN
-
-from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-
 
 
 def load_dataset_config():
@@ -230,46 +223,6 @@ def split_anndata_train_test(
     )
 
     return train_mouse_ids, test_mouse_ids
-
-
-def create_graphs_from_adata(
-    anndata_path: str,
-    dataset_name: str,
-    model_config: dict,
-    use_all_ids: bool = True,
-    batch_size: int = 32,
-    perturbation_mask_key: str = "perturbation_mask"
-) -> Tuple[List[Data], List[str], np.ndarray]:
-    """
-    Create graph objects by leveraging SpatialAgingCellDataset.process().
-    
-    Returns
-    -------
-    Tuple[List[Data], List[str], np.ndarray]
-        - List of graph Data objects
-        - List of gene names
-        - Array of original cell indices (for mapping back to original data)
-    """
-    inference_dataset = SpatialAgingCellDataset(
-        subfolder_name="predict",
-        dataset_prefix=dataset_name if dataset_name is not None else "temp",
-        target="expression",
-        k_hop=model_config["k_hop"],
-        augment_hop=model_config["augment_hop"],
-        node_feature=model_config["node_feature"],
-        inject_feature=model_config["inject_feature"],
-        num_cells_per_ct_id=model_config["num_cells_per_ct_id"],
-        center_celltypes=model_config["center_celltypes"],
-        use_ids=model_config["test_ids"] if use_all_ids is False else None,
-        raw_filepaths=[anndata_path],
-        celltypes_to_index=model_config["celltypes_to_index"],
-        normalize_total=model_config["normalize_total"],
-        perturbation_mask_key=perturbation_mask_key
-    )
-
-    inference_dataset.process()
-    inference_dataset_loader = DataLoader(inference_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-    return inference_dataset_loader
 
 
 def _combine_expression_with_genept(expression_matrix, gene_names, genept_embeddings):

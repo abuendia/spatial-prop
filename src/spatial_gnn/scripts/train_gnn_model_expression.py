@@ -12,7 +12,7 @@ from torch_geometric.loader import DataLoader
 
 from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config, parse_center_celltypes, split_anndata_train_test
+from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
 
 
 def train_model_from_scratch(
@@ -99,11 +99,12 @@ def train_model_from_scratch(
         train_ids, test_ids = split_anndata_train_test(
             adata, test_size=test_size, random_state=random_state, stratify_by=stratify_by
         )
+        train_ids = list(train_ids)
+        test_ids = list(test_ids)
         celltypes_to_index = {ct: i for i, ct in enumerate(adata.obs["celltype"].unique())}
         file_path = adata_path
     else:
         _, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
-    center_celltypes_parsed = parse_center_celltypes(center_celltypes)
     
     if inject_feature is not None and inject_feature.lower() == "none":
         inject_feature = None
@@ -122,7 +123,7 @@ def train_model_from_scratch(
         node_feature=node_feature,
         inject_feature=inject_feature,
         num_cells_per_ct_id=num_cells_per_ct_id,
-        center_celltypes=center_celltypes_parsed,
+        center_celltypes=center_celltypes,
         use_ids=train_ids,
         raw_filepaths=[file_path],
         gene_list=gene_list,
@@ -139,7 +140,7 @@ def train_model_from_scratch(
         node_feature=node_feature,
         inject_feature=inject_feature,
         num_cells_per_ct_id=num_cells_per_ct_id,
-        center_celltypes=center_celltypes_parsed,
+        center_celltypes=center_celltypes,
         use_ids=test_ids,
         raw_filepaths=[file_path],
         gene_list=gene_list,

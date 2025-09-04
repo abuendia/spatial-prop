@@ -16,6 +16,7 @@ from torch_geometric.utils.convert import from_scipy_sparse_matrix
 import json
 
 from spatial_gnn.utils.graph_utils import build_spatial_graph
+from spatial_gnn.utils.dataset_utils import parse_center_celltypes
 
 
 class SpatialAgingCellDataset(Dataset):
@@ -115,7 +116,7 @@ class SpatialAgingCellDataset(Dataset):
         self.inject_feature=inject_feature
         self.sub_id=sub_id
         self.use_ids=use_ids
-        self.center_celltypes=center_celltypes
+        self.center_celltypes=parse_center_celltypes(center_celltypes)
         self.num_cells_per_ct_id=num_cells_per_ct_id
         self.k_hop=k_hop
         self.augment_hop=augment_hop
@@ -131,8 +132,10 @@ class SpatialAgingCellDataset(Dataset):
         self.debug=debug
         self.overwrite=overwrite
 
-        if self.debug:
+        if self.use_ids is not None and self.debug:
             self.use_ids = self.use_ids[:2]
+        if self.use_ids is None:
+            self.use_ids = np.unique(self.raw_filepaths[0].obs[self.sub_id])[:2]
 
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
@@ -278,6 +281,9 @@ class SpatialAgingCellDataset(Dataset):
             genefn = self.processed_dir.split("/")[-2]
         else:
             genefn = self.processed_dir.split("/")[-1]
+
+        if not os.path.exists(os.path.join(self.root,self.processed_folder_name,"gene_names")):
+            os.makedirs(os.path.join(self.root,self.processed_folder_name,"gene_names"))
         pd.DataFrame(gene_names).to_csv(os.path.join(self.root,self.processed_folder_name,"gene_names",f"{genefn}.csv"), header=False, index=False)
         print(f"Gene saving: {time.time() - t1:.3f}s")
         
@@ -327,6 +333,8 @@ class SpatialAgingCellDataset(Dataset):
             
             # make and save subgraphs
             subgraph_count = 0
+            global_batch_counter = 0
+            global_aug_batch_counter = 0
             
             if self.use_ids is None:
                 sub_ids_arr = np.unique(adata.obs[self.sub_id])
@@ -444,7 +452,7 @@ class SpatialAgingCellDataset(Dataset):
                     center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
                 else:
                     center_celltypes_to_use = self.center_celltypes
-                
+                    
                 for ct in center_celltypes_to_use:
                     np.random.seed(444)
                     idxs = np.random.choice(np.arange(sub_adata.shape[0])[sub_adata.obs["celltype"]==ct],
@@ -484,7 +492,7 @@ class SpatialAgingCellDataset(Dataset):
                         if self.inject_feature is None:
                             subgraph_data = Data(x = sub_node_labels,
                                                  edge_index = sub_edge_index,
-                                                 y = torch.tensor([graph_label]).flatten(), # flatten used to handle uni- and multi-variate targets
+                                                 y = torch.tensor(graph_label),
                                                  center_node = center_id,
                                                  center_celltype = subgraph_cct,
                                                  celltypes = subgraph_cts,
@@ -497,7 +505,7 @@ class SpatialAgingCellDataset(Dataset):
                         else:
                             subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
-                                             y = torch.tensor([graph_label]).flatten(), # flatten used to handle uni- and multi-variate targets
+                                             y = torch.tensor(graph_label),
                                                  center_node = center_id,
                                                  center_celltype = subgraph_cct,
                                                  celltypes = subgraph_cts,
@@ -519,7 +527,8 @@ class SpatialAgingCellDataset(Dataset):
                 batch_size = self.batch_size
                 for i in range(0, len(subgraph_data_list), batch_size):
                     batch = subgraph_data_list[i:i+batch_size]
-                    torch.save(batch, os.path.join(self.processed_dir, f"batch_{subgraph_count//batch_size}.pt"))
+                    torch.save(batch, os.path.join(self.processed_dir, f"batch_{global_batch_counter}.pt"))
+                    global_batch_counter += 1
                     subgraph_count += len(batch)
                 print(f"      Subgraph saving: {time.time() - t1:.3f}s")
                         
@@ -583,7 +592,7 @@ class SpatialAgingCellDataset(Dataset):
                             if self.inject_feature is None:
                                 subgraph_data = Data(x = sub_node_labels,
                                                      edge_index = sub_edge_index,
-                                                     y = torch.tensor([graph_label]).flatten(), # flatten used to handle uni- and multi-variate targets
+                                                     y = torch.tensor(graph_label),
                                                      center_node = center_id,
                                                      center_celltype = subgraph_cct,
                                                      celltypes = subgraph_cts,
@@ -596,7 +605,7 @@ class SpatialAgingCellDataset(Dataset):
                             else:
                                 subgraph_data = Data(x = sub_node_labels,
                                                      edge_index = sub_edge_index,
-                                                     y = torch.tensor([graph_label]).flatten(), # flatten used to handle uni- and multi-variate targets
+                                                     y = torch.tensor(graph_label),
                                                      center_node = center_id,
                                                      center_celltype = subgraph_cct,
                                                      celltypes = subgraph_cts,
@@ -615,7 +624,8 @@ class SpatialAgingCellDataset(Dataset):
                     batch_size = self.batch_size
                     for i in range(0, len(augment_data_list), batch_size):
                         batch = augment_data_list[i:i+batch_size]
-                        torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{subgraph_count//batch_size}.pt"))
+                        torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{global_aug_batch_counter}.pt"))
+                        global_aug_batch_counter += 1
                         subgraph_count += len(batch)
                     
                     print(f"      Augmentation processing: {time.time() - t1:.3f}s")
@@ -678,20 +688,75 @@ class SpatialAgingCellDataset(Dataset):
         return (sub_node_labels, sub_edge_index, graph_label, center_node_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond)
 
     def len(self):
-        return len(self.processed_file_names)
+        # Count total number of graphs across all batch files
+        total_graphs = 0
+        for f in os.listdir(self.processed_dir):
+            if f.endswith('.pt'):
+                batch_file = os.path.join(self.processed_dir, f)
+                batch_data = torch.load(batch_file, weights_only=False)
+                total_graphs += len(batch_data)
+        return total_graphs
 
     def get(self, idx):
-        batch_idx = idx // self.batch_size 
-        batch_file = os.path.join(self.processed_dir, f'batch_{batch_idx}.pt')
-        if os.path.exists(batch_file):
-            # Original batch file
-            batch_data = torch.load(batch_file, weights_only=False)
-            return batch_data[idx % self.batch_size]
-        else:
-            # Try augmentation batch files
-            aug_batch_file = os.path.join(self.processed_dir, f'aug_batch_{batch_idx}.pt')
-            if os.path.exists(aug_batch_file):
-                batch_data = torch.load(aug_batch_file, weights_only=False)
-                return batch_data[idx % self.batch_size]
-            else:
-                raise FileNotFoundError(f"Could not find data for index {idx}")
+        # Cache batch information to avoid reloading every time
+        if not hasattr(self, '_batch_cache'):
+            self._batch_cache = self._build_batch_cache()
+        
+        batch_info = self._batch_cache
+        total_items = batch_info['total_items']
+        batch_offsets = batch_info['batch_offsets']
+        all_batch_files = batch_info['all_batch_files']
+        
+        if idx >= total_items:
+            raise IndexError(f"Index {idx} out of range (total items: {total_items})")
+        
+        # Find which batch contains this index
+        batch_idx = 0
+        for i, offset in enumerate(batch_offsets):
+            batch_size = batch_info['batch_sizes'][i]
+            if idx < offset + batch_size:
+                batch_idx = i
+                break
+        
+        batch_file = os.path.join(self.processed_dir, all_batch_files[batch_idx])
+        batch_data = torch.load(batch_file, weights_only=False)
+        local_idx = idx - batch_offsets[batch_idx]
+        
+        return batch_data[local_idx]
+    
+    def _build_batch_cache(self):
+        """Build cache of batch information to avoid reloading files repeatedly."""
+        batch_files = []
+        aug_batch_files = []
+        
+        for f in os.listdir(self.processed_dir):
+            if f.startswith('batch_') and f.endswith('.pt'):
+                batch_files.append(f)
+            elif f.startswith('aug_batch_') and f.endswith('.pt'):
+                aug_batch_files.append(f)
+        
+        # Sort files by their batch number
+        batch_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
+        aug_batch_files.sort(key=lambda x: int(x.split('_')[2].split('.')[0]))
+        
+        # Combine all batch files in order: regular batches first, then augmentation batches
+        all_batch_files = batch_files + aug_batch_files
+        
+        # Calculate the actual total length by loading each batch and counting items
+        total_items = 0
+        batch_offsets = []
+        batch_sizes = []
+        for batch_file in all_batch_files:
+            batch_path = os.path.join(self.processed_dir, batch_file)
+            batch_data = torch.load(batch_path, weights_only=False)
+            batch_offsets.append(total_items)
+            batch_size = len(batch_data)
+            batch_sizes.append(batch_size)
+            total_items += batch_size
+        
+        return {
+            'total_items': total_items,
+            'batch_offsets': batch_offsets,
+            'batch_sizes': batch_sizes,
+            'all_batch_files': all_batch_files
+        }

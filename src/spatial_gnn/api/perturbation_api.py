@@ -19,8 +19,8 @@ import matplotlib.pyplot as plt
 
 from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
 from spatial_gnn.utils.dataset_utils import load_model_from_path
-from spatial_gnn.utils.dataset_utils import create_graphs_from_adata
 from spatial_gnn.models.gnn_model import predict
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 
 
 def create_perturbation_mask(
@@ -48,20 +48,17 @@ def create_perturbation_mask(
     str
         Path to the saved AnnData file with perturbation mask
     """
-    # Make a copy to avoid modifying the original
-    adata_result = adata.copy()
-    
     # Create perturbation mask
-    perturbation_mask = np.ones((adata_result.shape[0], adata_result.shape[1]))
+    perturbation_mask = np.ones((adata.shape[0], adata.shape[1]))
     
     # Check if celltype column exists
-    if 'celltype' not in adata_result.obs.columns:
+    if 'celltype' not in adata.obs.columns:
         raise ValueError("AnnData object must have 'celltype' column in obs")
     
     # Apply perturbations for each cell type
     for cell_type, gene_multipliers in perturbation_dict.items():
         # Find cells of this type
-        cell_mask = adata_result.obs['celltype'] == cell_type
+        cell_mask = adata.obs['celltype'] == cell_type
         cell_indices = np.where(cell_mask)[0]
         
         if len(cell_indices) == 0:
@@ -72,15 +69,15 @@ def create_perturbation_mask(
         
         # Apply gene-specific multipliers
         for gene_name, multiplier in gene_multipliers.items():
-            if gene_name in adata_result.var_names:
-                gene_idx = adata_result.var_names.get_loc(gene_name)
-                perturbation_mask[cell_indices, gene_idx] = multiplier * adata_result.X[cell_indices, gene_idx]
+            if gene_name in adata.var_names:
+                gene_idx = adata.var_names.get_loc(gene_name)
+                perturbation_mask[cell_indices, gene_idx] = multiplier * adata.X[cell_indices, gene_idx]
                 print(f"  - Gene '{gene_name}': multiplier = {multiplier}")
             else:
                 print(f"Warning: Gene '{gene_name}' not found in data")
     
     # Add the perturbation mask to the AnnData
-    adata_result.obsm[mask_key] = perturbation_mask
+    adata.obsm[mask_key] = perturbation_mask
     
     # Save to file if path is provided
     if save_path is not None:
@@ -90,12 +87,12 @@ def create_perturbation_mask(
     # Store metadata about the perturbation
     perturbation_info = {
         'cell_types': list(perturbation_dict.keys()),
-        'n_perturbed_cells': sum(len(np.where(adata_result.obs['celltype'] == ct)[0]) 
+        'n_perturbed_cells': sum(len(np.where(adata.obs['celltype'] == ct)[0]) 
                                 for ct in perturbation_dict.keys()),
         'perturbed_genes': list(set(gene for genes in perturbation_dict.values() 
                                    for gene in genes.keys()))
     }
-    adata_result.uns['perturbation_info'] = perturbation_info
+    adata.uns['perturbation_info'] = perturbation_info
     
     print(f"\nPerturbation mask created:")
     print(f"- Shape: {perturbation_mask.shape}")
@@ -108,13 +105,12 @@ def create_perturbation_mask(
 
 
 def predict_perturbation_effects(
-    anndata_path: str,
+    adata_path: str,
     model_path: Optional[str] = None,
     perturbation_mask_key: str = 'perturbation_mask',
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     batch_size: int = 32,
     dataset: Optional[str] = None,
-    base_path: Optional[str] = None,
     k_hop: int = 2,
     augment_hop: int = 2,
     center_celltypes: str = "all",
@@ -216,8 +212,8 @@ def predict_perturbation_effects(
         - 'perturbation_mask': Boolean mask indicating which cells were perturbed
     """
     # Validate inputs
-    if anndata_path is not None and not isinstance(anndata_path, str):
-        raise TypeError("anndata_path must be a string or None")
+    if adata_path is not None and not isinstance(adata_path, str):
+        raise TypeError("adata_path must be a string or None")
     if model_path is not None and not isinstance(model_path, str):
         raise TypeError("model_path must be a string or None")
         
@@ -229,9 +225,6 @@ def predict_perturbation_effects(
         # Train new model from scratch
         print("No model path provided. Training new model from scratch...")
         model, model_config, trained_model_path = train_model_from_scratch(
-            dataset="aging_coronal",
-            base_path="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw",
-            adata_path=anndata_path,
             k_hop=k_hop,
             augment_hop=augment_hop,
             center_celltypes=center_celltypes,
@@ -240,9 +233,10 @@ def predict_perturbation_effects(
             learning_rate=learning_rate,
             loss=loss,
             epochs=epochs,
+            num_cells_per_ct_id=num_cells_per_ct_id,
+            adata_path=adata_path,
             gene_list=gene_list,
             normalize_total=normalize_total,
-            num_cells_per_ct_id=num_cells_per_ct_id,
             debug=debug,
             debug_subset_size=debug_subset_size,
             device=device
@@ -251,19 +245,37 @@ def predict_perturbation_effects(
 
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
-    inference_dataloader = create_graphs_from_adata(
-        anndata_path=anndata_path,
-        dataset_name=dataset,
-        model_config=model_config,
-        use_all_ids=True,
-        batch_size=batch_size,
+    inference_dataset = SpatialAgingCellDataset(
+        subfolder_name="predict",
+        dataset_prefix=dataset if dataset is not None else "temp",
+        target="expression",
+        k_hop=model_config["k_hop"],
+        augment_hop=model_config["augment_hop"],
+        node_feature=model_config["node_feature"],
+        inject_feature=model_config["inject_feature"],
+        num_cells_per_ct_id=model_config["num_cells_per_ct_id"],
+        center_celltypes=model_config["center_celltypes"],
+        use_ids=model_config["test_ids"] if model_config["test_ids"] is not None else True,
+        raw_filepaths=[adata_path],
+        celltypes_to_index=model_config["celltypes_to_index"],
+        normalize_total=model_config["normalize_total"],
         perturbation_mask_key=perturbation_mask_key
-    )    
-    print(f"Created {len(inference_dataloader)} graphs from input data")
+    )
+    inference_dataset.process()
+    
+    # Load batch files the same way as training
+    all_inference_data = []
+    for f in inference_dataset.processed_file_names:
+        all_inference_data.append(torch.load(os.path.join(inference_dataset.processed_dir, f), weights_only=False))
+    
+    inference_dataloader = DataLoader(all_inference_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    print(f"Created {len(all_inference_data)} batch files from input data")
+
     # Run model predict function
     adata_result = predict(model, inference_dataloader, adata, device)
     print("Perturbation prediction completed successfully!")
     return adata_result
+
 
 def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
     """
@@ -403,35 +415,32 @@ if __name__ == "__main__":
     }
     # Create perturbation mask and get file path
     if not os.path.exists(save_path):
-        adata_file_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
+        perturbed_adata_path = create_perturbation_mask(adata, perturbation_dict, save_path=save_path)
     else:
-        adata_file_path = save_path
-    
-    # # Example 1: Using pretrained model (inference mode)
-    # # Params inferred from model config
-    # print("=== Example 1: Using pretrained model ===")
-    # adata_perturbed = predict_perturbation_effects(
-    #     anndata_path=adata_file_path,
-    #     model_path=model_path,
-    #     perturbation_mask_key="perturbation_mask"
-    # )
-    
+        perturbed_adata_path = save_path
 
-    training_params = {
-        "k_hop": 2,
-        "augment_hop": 2,
-        "center_celltypes": "T cell,NSC,Pericyte",
-        "node_feature": "expression",
-        "inject_feature": "None",
-        "debug": True,
-        "debug_subset_size": 50,
-        "num_cells_per_ct_id": 100
-    }
-    adata_perturbed_trained = predict_perturbation_effects(
-        anndata_path=adata_file_path,
-        model_path=None,
-        perturbation_mask_key="perturbation_mask",
-        **training_params
+    print("=== Example 1: Using pretrained model ===")
+    adata_perturbed = predict_perturbation_effects(
+        adata_path=perturbed_adata_path,
+        model_path=model_path,
+        perturbation_mask_key="perturbation_mask"
     )
     
-    # Example 2: Training from scratch (training mode)
+    # training_params = {
+    #     "k_hop": 2,
+    #     "augment_hop": 2,
+    #     "center_celltypes": "T cell,NSC,Pericyte",
+    #     "node_feature": "expression",
+    #     "inject_feature": "None",
+    #     "debug": True,
+    #     "debug_subset_size": 10,
+    #     "num_cells_per_ct_id": 100,
+    #     "epochs": 10,
+    # }
+    # adata_perturbed_trained = predict_perturbation_effects(
+    #     adata_path=adata_file_path,
+    #     model_path=None,
+    #     perturbation_mask_key="perturbation_mask",
+    #     **training_params
+    # )
+    
