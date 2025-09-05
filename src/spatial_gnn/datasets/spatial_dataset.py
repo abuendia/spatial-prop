@@ -355,7 +355,7 @@ class SpatialAgingCellDataset(Dataset):
                 sample_args.append((sid, sid_idx, adata, gene_names, rfi, raw_filepath))
             
             # Determine number of processes (use min of available CPUs and number of samples)
-            num_processes = min(mp.cpu_count(), len(sub_ids_arr), 8)  # Cap at 8 to avoid memory issues
+            num_processes = min(mp.cpu_count(), len(sub_ids_arr), 4)  # Cap at 4 to avoid memory issues
             print(f"  Using {num_processes} processes for parallel sample processing")
             
             # Process samples in parallel
@@ -375,16 +375,15 @@ class SpatialAgingCellDataset(Dataset):
                 subgraph_count += subgraph_count_sample
             
             # Save subgraphs in batches
-            batch_size = self.batch_size
-            for i in range(0, len(all_subgraph_data), batch_size):
-                batch = all_subgraph_data[i:i+batch_size]
+            for i in range(0, len(all_subgraph_data), self.batch_size):
+                batch = all_subgraph_data[i:i+self.batch_size]
                 torch.save(batch, os.path.join(self.processed_dir, f"batch_{global_batch_counter}.pt"))
                 global_batch_counter += 1
             
             # Save augmentation data in batches
             if len(all_augment_data) > 0:
-                for i in range(0, len(all_augment_data), batch_size):
-                    batch = all_augment_data[i:i+batch_size]
+                for i in range(0, len(all_augment_data), self.batch_size):
+                    batch = all_augment_data[i:i+self.batch_size]
                     torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{global_aug_batch_counter}.pt"))
                     global_aug_batch_counter += 1
                     subgraph_count += len(batch)

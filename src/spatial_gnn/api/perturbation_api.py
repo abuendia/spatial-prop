@@ -421,6 +421,7 @@ if __name__ == "__main__":
     print("=== Training a new perturbation model ===")
     model, model_config, model_path = train_perturbation_model(
         adata_path=train_data_path,
+        exp_name="api_run",
         k_hop=2,
         augment_hop=2,
         center_celltypes="T cell,NSC,Pericyte",
@@ -436,15 +437,16 @@ if __name__ == "__main__":
     print("\n=== Predicting perturbation effects ===")
     adata_perturbed = predict_perturbation_effects(
         adata_path=test_data_path_perturbed,
+        exp_name="api_run",
         model_path=model_path,
         perturbation_dict=perturbation_dict,
         perturbation_mask_key="perturbation_mask"
     )
     
-    print("=== Visualizing perturbation effects ===")
-    visualize_perturbation_effects(adata_perturbed)
+    # print("=== Visualizing perturbation effects ===")
+    # visualize_perturbation_effects(adata_perturbed)
     
-    print("=== Getting perturbation summary ===")
-    perturbation_summary = get_perturbation_summary(adata_perturbed)
-    print(perturbation_summary)
+    # print("=== Getting perturbation summary ===")
+    # perturbation_summary = get_perturbation_summary(adata_perturbed)
+    # print(perturbation_summary)
     
