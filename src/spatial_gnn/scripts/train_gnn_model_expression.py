@@ -116,7 +116,7 @@ def train_model_from_scratch(
 
     train_dataset = SpatialAgingCellDataset(
         subfolder_name="train",
-        dataset_prefix=exp_name if exp_name is not None else dataset,
+        dataset_prefix=exp_name,
         target="expression",
         k_hop=k_hop,
         augment_hop=augment_hop,
@@ -133,7 +133,7 @@ def train_model_from_scratch(
 
     test_dataset = SpatialAgingCellDataset(
         subfolder_name="test",
-        dataset_prefix=exp_name if exp_name is not None else dataset,
+        dataset_prefix=exp_name,
         target="expression",
         k_hop=k_hop,
         augment_hop=augment_hop,

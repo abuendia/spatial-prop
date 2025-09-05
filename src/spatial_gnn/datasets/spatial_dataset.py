@@ -8,6 +8,8 @@ from scipy.sparse import issparse
 import pickle
 import random
 import time
+import multiprocessing as mp
+from functools import partial
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -99,7 +101,7 @@ class SpatialAgingCellDataset(Dataset):
                  perturbation_mask_key="perturbation_mask",
                  batch_size=100,
                  overwrite=False,
-                 debug=True,
+                 debug=False,
                 ):
     
         self.root=root
@@ -347,300 +349,331 @@ class SpatialAgingCellDataset(Dataset):
             print(f"  Sample ID processing: {time.time() - t1:.3f}s")
             print(f"  Processing {len(sub_ids_arr)} samples")
             
+            # Prepare arguments for multiprocessing
+            sample_args = []
             for sid_idx, sid in enumerate(sub_ids_arr):
-                sample_start_time = time.time()
-                print(f"    Sample {sid_idx+1}/{len(sub_ids_arr)}: {sid}")
-
-                # subset to each sample
-                t1 = time.time()
-                sub_adata = adata[(adata.obs[self.sub_id]==sid)]
-                print(f"      Sample subsetting: {time.time() - t1:.3f}s")
-
-                # Delaunay triangulation with pruning of > 200um distances
-                t1 = time.time()
-                build_spatial_graph(sub_adata, method="delaunay")
-                sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
-                sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
-                print(f"      Spatial graph building: {time.time() - t1:.3f}s")
-
-                edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
-                print(f"      PyG conversion: {time.time() - t1:.3f}s")
-                
-                ### Construct Node Labels
-                t1 = time.time()
-                if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
-                    raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
-                
-                # Check if perturbation mask exists and use it for expression features
-                use_perturbation_expression = False
-                if self.perturbation_mask_key in sub_adata.obs.keys():
-                    use_perturbation_expression = True
-                    print(f"Using perturbation mask from {self.perturbation_mask_key}")
-                
-                if "celltype" in self.node_feature:
-                    # get cell type one hot encoding
-                    node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
-                    node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
-                
-                if "expression" in self.node_feature:
-                    # get spatial expression - use perturbation mask if available
-                    if use_perturbation_expression:
-                        # Use perturbation mask values instead of original expression
-                        perturbation_expression = np.array([sub_adata.obs[self.perturbation_mask_key].iloc[i] for i in range(sub_adata.shape[0])])
-                        
-                        # Reshape to match gene dimensions if needed
-                        if len(perturbation_expression.shape) == 1:
-                            # Single value per cell, expand to match gene dimensions
-                            perturbation_expression = np.tile(perturbation_expression[:, np.newaxis], (1, sub_adata.shape[1]))
-                        
-                        if self.node_feature == "expression":
-                            node_labels = torch.tensor(perturbation_expression).float()
-                        else:
-                            node_labels = torch.cat((node_labels, torch.tensor(perturbation_expression).float()), 1).float()
-                    else:
-                        # Use original expression values
-                        if self.node_feature == "expression":
-                            node_labels = torch.tensor(sub_adata.X).float()
-                        else:
-                            node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
-                    
-                    # Combine with GenePT embeddings if available
-                    if self.genept_embeddings is not None:
-                        if use_perturbation_expression:
-                            # Use perturbation expression for GenePT combination
-                            genept_augmented_features = self._combine_expression_with_genept(perturbation_expression, sub_adata.var_names)
-                        else:
-                            # Use original expression for GenePT combination
-                            genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
-                        
-                        if self.node_feature == "expression":
-                            node_labels = torch.tensor(genept_augmented_features).float()
-                        else:
-                            node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
-                    
-                    # add missing gene indicators where == -1
-                    #node_labels = torch.cat((node_labels, torch.tensor((sub_adata.X==-1).astype(float))), 1).float()
-                
-                if self.node_feature == "gaussian":
-                    # random gaussian noise as features
-                    node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
-                
-                if "X_spatial" in sub_adata.obsm:
-                    precomputed_embed = torch.tensor(sub_adata.obsm["spatial"]).float()
-                    node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
-                
-                # If using embeddings, build embedding matrix for all cells in sub_adata
-                if self.cell_embeddings is not None:
-                    emb_dim = len(next(iter(self.cell_embeddings.values())))
-                    emb_matrix = np.zeros((sub_adata.shape[0], emb_dim), dtype=np.float32)
-                    for i, cid in enumerate(sub_adata.obs_names):
-                        if cid in self.cell_embeddings:
-                            emb_matrix[i] = self.cell_embeddings[cid]
-                        else:
-                            emb_matrix[i] = np.zeros(emb_dim, dtype=np.float32)
-                    emb_tensor = torch.tensor(emb_matrix).float()
-                else:
-                    emb_tensor = None
-                
-                print(f"      Node label construction: {time.time() - t1:.3f}s")
-                
-                ### Get Indices of Random Center Cells
-                t1 = time.time()
-                cell_idxs = []
-                
-                if self.center_celltypes == "all":
-                    center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
-                else:
-                    center_celltypes_to_use = self.center_celltypes
-                    
-                for ct in center_celltypes_to_use:
-                    np.random.seed(444)
-                    idxs = np.random.choice(np.arange(sub_adata.shape[0])[sub_adata.obs["celltype"]==ct],
-                                            np.min([self.num_cells_per_ct_id, np.sum(sub_adata.obs["celltype"]==ct)]),
-                                            replace=False)
-                    cell_idxs = np.concatenate((cell_idxs, idxs))
-                
-                print(f"      Center cell selection: {time.time() - t1:.3f}s")
-                print(f"      Selected {len(cell_idxs)} center cells")
-
-                ### Extract K-hop Subgraphs
-                t1 = time.time()
-                
-                graph_labels = [] # for computing quantiles later
-                subgraph_data_list = []
-                
-                for cidx in cell_idxs:
-                    cidx = int(cidx)
-                    # get subgraph
-                    sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
-                    
-                    # filter out tiny subgraphs
-                    if len(sub_node_labels) > 2*self.k_hop:
-                        
-                        # append graph_label (for computing augmentation quantiles)
-                        graph_labels.append(graph_label)
-                        
-                        # get injected labels
-                        if (self.inject_feature == "center_celltype"):
-                            #injected_labels = sub_node_labels[center_id,:len(self.celltypes_to_index.keys())].detach().clone() # get center cell type vector
-                            injected_labels = one_hot(torch.tensor([self.celltypes_to_index[subgraph_cct[0]]]), num_classes=len(self.celltypes_to_index.keys()))
-                        
-                        # zero out center cell node features
-                        sub_node_labels[center_id,:] = 0
-                        
-                        # make PyG Data object
-                        if self.inject_feature is None:
-                            subgraph_data = Data(x = sub_node_labels,
-                                                 edge_index = sub_edge_index,
-                                                 y = torch.tensor(graph_label),
-                                                 center_node = center_id,
-                                                 center_celltype = subgraph_cct,
-                                                 celltypes = subgraph_cts,
-                                                 region = subgraph_region,
-                                                 age = subgraph_age,
-                                                 condition = subgraph_cond,
-                                                 dataset = raw_filepath, 
-                                                 original_cell_idx = cidx,
-                                                 original_cell_id = sub_adata.obs_names[cidx])
-                        else:
-                            subgraph_data = Data(x = sub_node_labels,
-                                             edge_index = sub_edge_index,
-                                             y = torch.tensor(graph_label),
-                                                 center_node = center_id,
-                                                 center_celltype = subgraph_cct,
-                                                 celltypes = subgraph_cts,
-                                                 region = subgraph_region,
-                                                 age = subgraph_age,
-                                                 condition = subgraph_cond,
-                                                 inject = injected_labels,
-                                                 dataset = raw_filepath, 
-                                                 original_cell_idx = cidx,
-                                                 original_cell_id = sub_adata.obs_names[cidx])
-
-                        subgraph_data_list.append(subgraph_data)
-                
-                print(f"      Subgraph extraction: {time.time() - t1:.3f}s")
-                print(f"      Created {len(subgraph_data_list)} subgraphs")
-                
-                # Save subgraphs in batches
-                t1 = time.time()
-                batch_size = self.batch_size
-                for i in range(0, len(subgraph_data_list), batch_size):
-                    batch = subgraph_data_list[i:i+batch_size]
-                    torch.save(batch, os.path.join(self.processed_dir, f"batch_{global_batch_counter}.pt"))
-                    global_batch_counter += 1
-                    subgraph_count += len(batch)
-                print(f"      Subgraph saving: {time.time() - t1:.3f}s")
-                        
-                ### Selective Graph Augmentation
-                
-                # get augmentation indices
-                if self.augment_hop > 0:
-                    t1 = time.time()
-                    augment_idxs = []
-                    for cidx in cell_idxs:
-                        # get subgraph and get node indices of all nodes
-                        sub_nodes, sub_edge_index, center_node_idx, edge_mask = k_hop_subgraph(
-                                                                                int(cidx),
-                                                                                self.augment_hop, 
-                                                                                edge_index,
-                                                                                relabel_nodes=True)
-                        augment_idxs = np.concatenate((augment_idxs,sub_nodes.detach().numpy()))
-                    
-                    augment_idxs = np.unique(augment_idxs) # remove redundancies
-                    
-                    avg_aug_size = len(augment_idxs)/len(cell_idxs) # get average number of augmentations per center cell
-                
-                    # compute augmentation cutoff
-                    if self.augment_cutoff == "auto":
-                        bins, bin_edges = np.histogram(graph_labels, bins=5)
-                        bins = np.concatenate((bins[0:1], bins, bins[-1:])) # expand edge bins with duplicate counts
-                    else:
-                        absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
-                    
-                    print(f"      Augmentation setup: {time.time() - t1:.3f}s")
-
-                                        # get subgraphs and save for augmentation
-                    t1 = time.time()
-                    augment_count = 0
-                    augment_data_list = []
-                    
-                    for cidx in augment_idxs:               
-                        # get subgraph
-                        cidx = int(cidx)
-                        sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(cidx, edge_index, node_labels, sub_adata)
-                                        
-                        # augmentation selection conditions
-                        if self.augment_cutoff == "auto": # probabilistic
-                            curr_bin = bins[np.digitize(graph_label,bin_edges)] # get freq of current bin
-                            prob_aug = (np.max(bins) - curr_bin) / (curr_bin * avg_aug_size * (1-self.dispersion_factor))
-                            do_aug = (random.random() < prob_aug) # augment with probability based on max bin size
-                        else: # by quantile cutoff
-                            do_aug = (np.mean(np.abs(graph_label)) >= absglcutoff) # if pass graph label cutoff then augment
-                        
-                        # save augmented graphs if conditions met
-                        if (len(sub_node_labels) > 2*self.k_hop) and (do_aug):
-                        
-                            # get injected labels
-                            if (self.inject_feature == "center_celltype"):
-                                injected_labels = one_hot(torch.tensor([self.celltypes_to_index[subgraph_cct[0]]]), num_classes=len(self.celltypes_to_index.keys()))
-                            
-                            # zero out center cell node features
-                            sub_node_labels[center_id,:] = 0
-                            
-                            # make PyG Data object
-                            if self.inject_feature is None:
-                                subgraph_data = Data(x = sub_node_labels,
-                                                     edge_index = sub_edge_index,
-                                                     y = torch.tensor(graph_label),
-                                                     center_node = center_id,
-                                                     center_celltype = subgraph_cct,
-                                                     celltypes = subgraph_cts,
-                                                     region = subgraph_region,
-                                                     age = subgraph_age,
-                                                     condition = subgraph_cond,
-                                                     dataset = raw_filepath, 
-                                                     original_cell_idx = cidx,
-                                                     original_cell_id = sub_adata.obs_names[cidx])
-                            else:
-                                subgraph_data = Data(x = sub_node_labels,
-                                                     edge_index = sub_edge_index,
-                                                     y = torch.tensor(graph_label),
-                                                     center_node = center_id,
-                                                     center_celltype = subgraph_cct,
-                                                     celltypes = subgraph_cts,
-                                                     region = subgraph_region,
-                                                     age = subgraph_age,
-                                                     condition = subgraph_cond,
-                                                     inject = injected_labels,
-                                                     dataset = raw_filepath, 
-                                                     original_cell_idx = cidx,
-                                                     original_cell_id = sub_adata.obs_names[cidx])
-
-                            augment_data_list.append(subgraph_data)
-                            augment_count += 1
-                    
-                    # Save augmentation data in batches
-                    batch_size = self.batch_size
-                    for i in range(0, len(augment_data_list), batch_size):
-                        batch = augment_data_list[i:i+batch_size]
-                        torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{global_aug_batch_counter}.pt"))
-                        global_aug_batch_counter += 1
-                        subgraph_count += len(batch)
-                    
-                    print(f"      Augmentation processing: {time.time() - t1:.3f}s")
-                    print(f"      Created {augment_count} augmented subgraphs")
-                
-                sample_time = time.time() - sample_start_time
-                print(f"    Sample {sid} completed in {sample_time:.3f}s")
+                sample_args.append((sid, sid_idx, adata, gene_names, rfi, raw_filepath))
             
-            file_time = time.time() - file_start_time
-            print(f"  File {os.path.basename(raw_filepath)} completed in {file_time:.3f}s")
-            print(f"  Total subgraphs created: {subgraph_count}")
-        
+            # Determine number of processes (use min of available CPUs and number of samples)
+            num_processes = min(mp.cpu_count(), len(sub_ids_arr), 8)  # Cap at 8 to avoid memory issues
+            print(f"  Using {num_processes} processes for parallel sample processing")
+            
+            # Process samples in parallel
+            t1 = time.time()
+            with mp.Pool(processes=num_processes) as pool:
+                results = pool.map(self._process_single_sample, sample_args)
+            print(f"  Parallel sample processing: {time.time() - t1:.3f}s")
+            
+            # Collect results and save batches
+            t1 = time.time()
+            all_subgraph_data = []
+            all_augment_data = []
+            
+            for subgraph_data_list, augment_data_list, subgraph_count_sample, augment_count_sample in results:
+                all_subgraph_data.extend(subgraph_data_list)
+                all_augment_data.extend(augment_data_list)
+                subgraph_count += subgraph_count_sample
+            
+            # Save subgraphs in batches
+            batch_size = self.batch_size
+            for i in range(0, len(all_subgraph_data), batch_size):
+                batch = all_subgraph_data[i:i+batch_size]
+                torch.save(batch, os.path.join(self.processed_dir, f"batch_{global_batch_counter}.pt"))
+                global_batch_counter += 1
+            
+            # Save augmentation data in batches
+            if len(all_augment_data) > 0:
+                for i in range(0, len(all_augment_data), batch_size):
+                    batch = all_augment_data[i:i+batch_size]
+                    torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{global_aug_batch_counter}.pt"))
+                    global_aug_batch_counter += 1
+                    subgraph_count += len(batch)
+                    
         total_time = time.time() - total_start_time
         print(f"\nDataset processing completed in {total_time:.3f}s ({total_time/60:.1f} minutes)")
         print(f"Total subgraphs created: {subgraph_count}")
+
+    def _process_single_sample(self, args):
+        """
+        Process a single sample ID.
+        
+        Parameters
+        ----------
+        args : tuple
+            (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
+            
+        Returns
+        -------
+        tuple
+            (subgraph_data_list, augment_data_list, subgraph_count, augment_count)
+        """
+        sid, sid_idx, adata, gene_names, rfi, raw_filepath = args
+        
+        sample_start_time = time.time()
+        print(f"    Sample {sid_idx+1}: {sid} (PID: {os.getpid()})")
+        
+        # subset to each sample
+        t1 = time.time()
+        sub_adata = adata[(adata.obs[self.sub_id]==sid)]
+        print(f"      Sample subsetting: {time.time() - t1:.3f}s")
+        
+        # Delaunay triangulation with pruning of > 200um distances
+        t1 = time.time()
+        build_spatial_graph(sub_adata, method="delaunay")
+        sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
+        sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
+        print(f"      Spatial graph building: {time.time() - t1:.3f}s")
+        
+        edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
+        print(f"      PyG conversion: {time.time() - t1:.3f}s")
+        
+        ### Construct Node Labels
+        t1 = time.time()
+        if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
+            raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
+        
+        # Check if perturbation mask exists and use it for expression features
+        use_perturbation_expression = False
+        if self.perturbation_mask_key in sub_adata.obs.keys():
+            use_perturbation_expression = True
+            print(f"Using perturbation mask from {self.perturbation_mask_key}")
+        
+        if "celltype" in self.node_feature:
+            # get cell type one hot encoding
+            node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
+            node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
+        
+        if "expression" in self.node_feature:
+            # get spatial expression - use perturbation mask if available
+            if use_perturbation_expression:
+                # Use perturbation mask values instead of original expression
+                perturbation_expression = np.array([sub_adata.obs[self.perturbation_mask_key].iloc[i] for i in range(sub_adata.shape[0])])
+                
+                # Reshape to match gene dimensions if needed
+                if len(perturbation_expression.shape) == 1:
+                    # Single value per cell, expand to match gene dimensions
+                    perturbation_expression = np.tile(perturbation_expression[:, np.newaxis], (1, sub_adata.shape[1]))
+                
+                if self.node_feature == "expression":
+                    node_labels = torch.tensor(perturbation_expression).float()
+                else:
+                    node_labels = torch.cat((node_labels, torch.tensor(perturbation_expression).float()), 1).float()
+            else:
+                # Use original expression values
+                if self.node_feature == "expression":
+                    node_labels = torch.tensor(sub_adata.X).float()
+                else:
+                    node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
+            
+            # Combine with GenePT embeddings if available
+            if self.genept_embeddings is not None:
+                if use_perturbation_expression:
+                    # Use perturbation expression for GenePT combination
+                    genept_augmented_features = self._combine_expression_with_genept(perturbation_expression, sub_adata.var_names)
+                else:
+                    # Use original expression for GenePT combination
+                    genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
+                
+                if self.node_feature == "expression":
+                    node_labels = torch.tensor(genept_augmented_features).float()
+                else:
+                    node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
+        
+        if self.node_feature == "gaussian":
+            # random gaussian noise as features
+            node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
+        
+        if "X_spatial" in sub_adata.obsm:
+            precomputed_embed = torch.tensor(sub_adata.obsm["spatial"]).float()
+            node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
+        
+        # If using embeddings, build embedding matrix for all cells in sub_adata
+        if self.cell_embeddings is not None:
+            emb_dim = len(next(iter(self.cell_embeddings.values())))
+            emb_matrix = np.zeros((sub_adata.shape[0], emb_dim), dtype=np.float32)
+            for i, cid in enumerate(sub_adata.obs_names):
+                if cid in self.cell_embeddings:
+                    emb_matrix[i] = self.cell_embeddings[cid]
+                else:
+                    emb_matrix[i] = np.zeros(emb_dim, dtype=np.float32)
+            emb_tensor = torch.tensor(emb_matrix).float()
+        else:
+            emb_tensor = None
+        
+        print(f"      Node label construction: {time.time() - t1:.3f}s")
+        
+        ### Get Indices of Random Center Cells
+        t1 = time.time()
+        cell_idxs = []
+        
+        if self.center_celltypes == "all":
+            center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
+        else:
+            center_celltypes_to_use = self.center_celltypes
+            
+        for ct in center_celltypes_to_use:
+            np.random.seed(444)
+            idxs = np.random.choice(np.arange(sub_adata.shape[0])[sub_adata.obs["celltype"]==ct],
+                                    np.min([self.num_cells_per_ct_id, np.sum(sub_adata.obs["celltype"]==ct)]),
+                                    replace=False)
+            cell_idxs = np.concatenate((cell_idxs, idxs))
+        
+        print(f"      Center cell selection: {time.time() - t1:.3f}s")
+        print(f"      Selected {len(cell_idxs)} center cells")
+        
+        ### Extract K-hop Subgraphs
+        t1 = time.time()
+        
+        graph_labels = [] # for computing quantiles later
+        subgraph_data_list = []
+        
+        for cidx in cell_idxs:
+            cidx = int(cidx)
+            # get subgraph
+            sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(int(cidx), edge_index, node_labels, sub_adata)
+            
+            # filter out tiny subgraphs
+            if len(sub_node_labels) > 2*self.k_hop:
+                
+                # append graph_label (for computing augmentation quantiles)
+                graph_labels.append(graph_label)
+                
+                # get injected labels
+                if (self.inject_feature == "center_celltype"):
+                    injected_labels = one_hot(torch.tensor([self.celltypes_to_index[subgraph_cct[0]]]), num_classes=len(self.celltypes_to_index.keys()))
+                
+                # zero out center cell node features
+                sub_node_labels[center_id,:] = 0
+                
+                # make PyG Data object
+                if self.inject_feature is None:
+                    subgraph_data = Data(x = sub_node_labels,
+                                         edge_index = sub_edge_index,
+                                         y = torch.tensor(graph_label),
+                                         center_node = center_id,
+                                         center_celltype = subgraph_cct,
+                                         celltypes = subgraph_cts,
+                                         region = subgraph_region,
+                                         age = subgraph_age,
+                                         condition = subgraph_cond,
+                                         dataset = raw_filepath, 
+                                         original_cell_idx = cidx,
+                                         original_cell_id = sub_adata.obs_names[cidx])
+                else:
+                    subgraph_data = Data(x = sub_node_labels,
+                                     edge_index = sub_edge_index,
+                                     y = torch.tensor(graph_label),
+                                         center_node = center_id,
+                                         center_celltype = subgraph_cct,
+                                         celltypes = subgraph_cts,
+                                         region = subgraph_region,
+                                         age = subgraph_age,
+                                         condition = subgraph_cond,
+                                         inject = injected_labels,
+                                         dataset = raw_filepath, 
+                                         original_cell_idx = cidx,
+                                         original_cell_id = sub_adata.obs_names[cidx])
+                
+                subgraph_data_list.append(subgraph_data)
+        
+        print(f"      Subgraph extraction: {time.time() - t1:.3f}s")
+        print(f"      Created {len(subgraph_data_list)} subgraphs")
+        
+        ### Selective Graph Augmentation
+        augment_data_list = []
+        augment_count = 0
+        
+        # get augmentation indices
+        if self.augment_hop > 0:
+            t1 = time.time()
+            augment_idxs = []
+            for cidx in cell_idxs:
+                # get subgraph and get node indices of all nodes
+                sub_nodes, sub_edge_index, center_node_idx, edge_mask = k_hop_subgraph(
+                                                                    int(cidx),
+                                                                    self.augment_hop, 
+                                                                    edge_index,
+                                                                    relabel_nodes=True)
+                augment_idxs = np.concatenate((augment_idxs,sub_nodes.detach().numpy()))
+            
+            augment_idxs = np.unique(augment_idxs) # remove redundancies
+            
+            avg_aug_size = len(augment_idxs)/len(cell_idxs) # get average number of augmentations per center cell
+        
+            # compute augmentation cutoff
+            if self.augment_cutoff == "auto":
+                bins, bin_edges = np.histogram(graph_labels, bins=5)
+                bins = np.concatenate((bins[0:1], bins, bins[-1:])) # expand edge bins with duplicate counts
+            else:
+                absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
+            
+            print(f"      Augmentation setup: {time.time() - t1:.3f}s")
+            
+            # get subgraphs and save for augmentation
+            t1 = time.time()
+            
+            for cidx in augment_idxs:               
+                # get subgraph
+                cidx = int(cidx)
+                sub_node_labels, sub_edge_index, graph_label, center_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond = self.subgraph_from_index(cidx, edge_index, node_labels, sub_adata)
+                                
+                # augmentation selection conditions
+                if self.augment_cutoff == "auto": # probabilistic
+                    curr_bin = bins[np.digitize(graph_label,bin_edges)] # get freq of current bin
+                    prob_aug = (np.max(bins) - curr_bin) / (curr_bin * avg_aug_size * (1-self.dispersion_factor))
+                    do_aug = (random.random() < prob_aug) # augment with probability based on max bin size
+                else: # by quantile cutoff
+                    do_aug = (np.mean(np.abs(graph_label)) >= absglcutoff) # if pass graph label cutoff then augment
+                
+                # save augmented graphs if conditions met
+                if (len(sub_node_labels) > 2*self.k_hop) and (do_aug):
+                
+                    # get injected labels
+                    if (self.inject_feature == "center_celltype"):
+                        injected_labels = one_hot(torch.tensor([self.celltypes_to_index[subgraph_cct[0]]]), num_classes=len(self.celltypes_to_index.keys()))
+                    
+                    # zero out center cell node features
+                    sub_node_labels[center_id,:] = 0
+                    
+                    # make PyG Data object
+                    if self.inject_feature is None:
+                        subgraph_data = Data(x = sub_node_labels,
+                                             edge_index = sub_edge_index,
+                                             y = torch.tensor(graph_label),
+                                             center_node = center_id,
+                                             center_celltype = subgraph_cct,
+                                             celltypes = subgraph_cts,
+                                             region = subgraph_region,
+                                             age = subgraph_age,
+                                             condition = subgraph_cond,
+                                             dataset = raw_filepath, 
+                                             original_cell_idx = cidx,
+                                             original_cell_id = sub_adata.obs_names[cidx])
+                    else:
+                        subgraph_data = Data(x = sub_node_labels,
+                                             edge_index = sub_edge_index,
+                                             y = torch.tensor(graph_label),
+                                             center_node = center_id,
+                                             center_celltype = subgraph_cct,
+                                             celltypes = subgraph_cts,
+                                             region = subgraph_region,
+                                             age = subgraph_age,
+                                             condition = subgraph_cond,
+                                             inject = injected_labels,
+                                             dataset = raw_filepath, 
+                                             original_cell_idx = cidx,
+                                             original_cell_id = sub_adata.obs_names[cidx])
+                    
+                    augment_data_list.append(subgraph_data)
+                    augment_count += 1
+            
+            print(f"      Augmentation processing: {time.time() - t1:.3f}s")
+            print(f"      Created {augment_count} augmented subgraphs")
+        
+        sample_time = time.time() - sample_start_time
+        print(f"    Sample {sid} completed in {sample_time:.3f}s")
+        
+        return subgraph_data_list, augment_data_list, len(subgraph_data_list), augment_count
 
     
     def subgraph_from_index (self, cidx, edge_index, node_labels, sub_adata):

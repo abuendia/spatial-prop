@@ -106,6 +106,7 @@ def create_perturbation_mask(
 
 def train_perturbation_model(
     adata_path: str,
+    exp_name: str,
     k_hop: int = 2,
     augment_hop: int = 2,
     center_celltypes: str = "all",
@@ -129,6 +130,8 @@ def train_perturbation_model(
     ----------
     adata_path : str
         Path to the training AnnData file (.h5ad)
+    exp_name : str
+        Name of the experiment
     k_hop : int, default=2
         k-hop neighborhood size
     augment_hop : int, default=2
@@ -165,6 +168,7 @@ def train_perturbation_model(
     """
     print("Training new perturbation model from scratch...")
     model, model_config, trained_model_path = train_model_from_scratch(
+        exp_name=exp_name,
         k_hop=k_hop,
         augment_hop=augment_hop,
         center_celltypes=center_celltypes,
@@ -188,6 +192,7 @@ def train_perturbation_model(
 def predict_perturbation_effects(
     adata_path: str,
     model_path: str,
+    exp_name: str,
     perturbation_dict: Dict[str, Dict[str, float]],
     perturbation_mask_key: str = 'perturbation_mask',
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -205,6 +210,8 @@ def predict_perturbation_effects(
         Path to the test AnnData file (.h5ad) containing spatial transcriptomics data
     model_path : str
         Path to the saved model state dictionary (.pth file)
+    exp_name : str
+        Name of the experiment
     perturbation_dict : Dict[str, Dict[str, float]]
         Dictionary specifying perturbations:
         - Keys: cell type names
@@ -247,7 +254,7 @@ def predict_perturbation_effects(
     print("Creating graphs from input data...")
     inference_dataset = SpatialAgingCellDataset(
         subfolder_name="predict",
-        dataset_prefix="temp",
+        dataset_prefix=exp_name,
         target="expression",
         k_hop=model_config["k_hop"],
         augment_hop=model_config["augment_hop"],
@@ -419,8 +426,6 @@ if __name__ == "__main__":
         center_celltypes="T cell,NSC,Pericyte",
         node_feature="expression",
         inject_feature="None",
-        debug=True,
-        debug_subset_size=10,
         num_cells_per_ct_id=100,
         epochs=10,
     )
