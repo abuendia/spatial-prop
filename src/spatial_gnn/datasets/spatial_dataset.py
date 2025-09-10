@@ -1,15 +1,14 @@
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import squidpy as sq
 import anndata as ad
 import os
 from scipy.sparse import issparse
 import pickle
 import random
-import time
 import multiprocessing as mp
-from functools import partial
+from pathlib import Path
+import shutil
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -53,6 +52,7 @@ class SpatialAgingCellDataset(Dataset):
         dispersion_factor [0 <= float < 1] - factor for dispersion of augmentation sampling of rare graph labels; higher means more rare samples
         radius_cutoff [float] - radius cutoff for Delaunay triangulation edges
         celltypes_to_index [dict] - dictionary mapping cell type labels to integer index
+        use_mp [bool] - whether to use multiprocessing for sample processing (default: False)
     '''
     def __init__(self, 
                  root=".",
@@ -99,11 +99,11 @@ class SpatialAgingCellDataset(Dataset):
                  embedding_json=None,
                  genept_embeddings_path=None,
                  perturbation_mask_key="perturbation_mask",
-                 batch_size=100,
-                 overwrite=False,
-                 debug=False,
+                 batch_size=500,
+                 overwrite=True,
+                 debug=True,
+                 use_mp=False,
                 ):
-    
         self.root=root
         self.dataset_prefix=dataset_prefix
         self.transform=transform
@@ -133,11 +133,7 @@ class SpatialAgingCellDataset(Dataset):
         self.batch_size=batch_size
         self.debug=debug
         self.overwrite=overwrite
-
-        if self.use_ids is not None and self.debug:
-            self.use_ids = self.use_ids[:2]
-        if self.use_ids is None:
-            self.use_ids = np.unique(self.raw_filepaths[0].obs[self.sub_id])[:2]
+        self.use_mp=use_mp
 
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
@@ -161,7 +157,7 @@ class SpatialAgingCellDataset(Dataset):
         if self.overwrite:
             if os.path.exists(self.processed_dir):
                 print(f"Overwriting existing dataset at {self.processed_dir}")
-                os.system(f"rm -rf {self.processed_dir}")
+                shutil.rmtree(self.processed_dir)
             else:
                 print(f"Creating new dataset at {self.processed_dir}")
 
@@ -253,8 +249,12 @@ class SpatialAgingCellDataset(Dataset):
         return gene_names
     
     def process(self):
-        total_start_time = time.time()
-        print(f"Starting dataset processing at {time.strftime('%H:%M:%S')}")
+
+        manifest = {
+            "batches": [],
+            "augment_batches": [],
+            "version": 1.0,
+        }
         
         # Create / overwrite directory
         if not os.path.exists(self.processed_dir):
@@ -262,23 +262,10 @@ class SpatialAgingCellDataset(Dataset):
         else:
             print ("Dataset already exists at: ", self.processed_dir)
             return()
-        
-        # define augmentation
-        if self.augment_cutoff == 'auto':
-            aug_key = self.augment_cutoff
-        else:
-            aug_key = int(self.augment_cutoff*100)
             
-        # read in genes
-        t1 = time.time()
         gene_names = self.gene_names
-        
-        # Convert gene names to uppercase for consistency
         gene_names = np.array([gene.upper() for gene in gene_names])
-        print(f"Gene processing: {time.time() - t1:.3f}s")
         
-        # save genes (already converted to uppercase)
-        t1 = time.time()
         if self.subfolder_name is not None:
             genefn = self.processed_dir.split("/")[-2]
         else:
@@ -287,32 +274,39 @@ class SpatialAgingCellDataset(Dataset):
         if not os.path.exists(os.path.join(self.root,self.processed_folder_name,"gene_names")):
             os.makedirs(os.path.join(self.root,self.processed_folder_name,"gene_names"))
         pd.DataFrame(gene_names).to_csv(os.path.join(self.root,self.processed_folder_name,"gene_names",f"{genefn}.csv"), header=False, index=False)
-        print(f"Gene saving: {time.time() - t1:.3f}s")
         
+        # make and save subgraphs
+        subgraph_count = 0
+        global_batch_counter = 0
+        global_aug_batch_counter = 0
+
         for rfi, raw_filepath in enumerate(self.raw_filepaths):
-            file_start_time = time.time()
             print(f"\nProcessing file {rfi+1}/{len(self.raw_filepaths)}: {os.path.basename(raw_filepath)}")
             # load raw data
-            t1 = time.time()
             adata = sc.read_h5ad(raw_filepath)
+
+            if self.use_ids is None:
+                sub_ids_arr = np.unique(adata.obs[self.sub_id])
+            elif self.use_ids[rfi] is None:
+                sub_ids_arr = np.unique(adata.obs[self.sub_id])
+            else:
+                sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
+
+            if self.debug:
+                sub_ids_arr = sub_ids_arr[:1]
+
             if issparse(adata.X):
                 adata.X = adata.X.toarray()
-            print(f"  File loading: {time.time() - t1:.3f}s")
             
             # filter to known cell type keys
-            t1 = time.time()
             adata = adata[adata.obs.celltype.isin(self.celltypes_to_index.keys())]
-            print(f"  Cell type filtering: {time.time() - t1:.3f}s")
             
             # normalize by total genes
-            t1 = time.time()
             if self.normalize_total is True:
                 print("  Normalizing data")
                 sc.pp.normalize_total(adata, target_sum=adata.shape[1])
-            print(f"  Normalization: {time.time() - t1:.3f}s")
             
             # handle missing genes (-1 token, indicators added later)
-            t1 = time.time()
             missing_genes = [gene for gene in gene_names if gene not in adata.var_names]
             missing_X = -np.ones((adata.shape[0],len(missing_genes)))
             orig_obs_names = adata.obs_names.copy()
@@ -322,21 +316,13 @@ class SpatialAgingCellDataset(Dataset):
                                obsm = adata.obsm)
             adata.obs_names = orig_obs_names
             adata.var_names = np.concatenate((orig_var_names, missing_genes))
-            print(f"  Missing gene handling: {time.time() - t1:.3f}s")
             
             # order by gene_names
-            t1 = time.time()
             adata = adata[:, gene_names]
             
             # Convert all gene names to uppercase for consistency
             adata.var_names = [gene.upper() for gene in adata.var_names]
             gene_names = np.array([gene.upper() for gene in gene_names])
-            print(f"  Gene ordering: {time.time() - t1:.3f}s")
-            
-            # make and save subgraphs
-            subgraph_count = 0
-            global_batch_counter = 0
-            global_aug_batch_counter = 0
             
             if self.use_ids is None:
                 sub_ids_arr = np.unique(adata.obs[self.sub_id])
@@ -346,50 +332,62 @@ class SpatialAgingCellDataset(Dataset):
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
             else:
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids))
-            print(f"  Sample ID processing: {time.time() - t1:.3f}s")
             print(f"  Processing {len(sub_ids_arr)} samples")
             
-            # Prepare arguments for multiprocessing
-            sample_args = []
-            for sid_idx, sid in enumerate(sub_ids_arr):
-                sample_args.append((sid, sid_idx, adata, gene_names, rfi, raw_filepath))
-            
-            # Determine number of processes (use min of available CPUs and number of samples)
-            num_processes = min(mp.cpu_count(), len(sub_ids_arr), 4)  # Cap at 4 to avoid memory issues
-            print(f"  Using {num_processes} processes for parallel sample processing")
-            
-            # Process samples in parallel
-            t1 = time.time()
-            with mp.Pool(processes=num_processes) as pool:
-                results = pool.map(self._process_single_sample, sample_args)
-            print(f"  Parallel sample processing: {time.time() - t1:.3f}s")
+            # Process samples either with multiprocessing or sequentially
+            if self.use_mp:
+                # Prepare arguments for multiprocessing
+                sample_args = []
+                for sid_idx, sid in enumerate(sub_ids_arr):
+                    sample_args.append((sid, sid_idx, adata, gene_names, rfi, raw_filepath))
+                
+                # Determine number of processes (use min of available CPUs and number of samples)
+                num_processes = min(mp.cpu_count(), len(sub_ids_arr), 4)  # Cap at 4 to avoid memory issues
+                print(f"  Using {num_processes} processes for parallel sample processing")
+                
+                # Process samples in parallel
+                with mp.Pool(processes=num_processes) as pool:
+                    results = pool.map(self._process_single_sample, sample_args)
+            else:
+                # Process samples sequentially
+                print(f"  Using sequential processing for {len(sub_ids_arr)} samples")
+                results = []
+                for sid_idx, sid in enumerate(sub_ids_arr):
+                    sample_args = (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
+                    result = self._process_single_sample(sample_args)
+                    results.append(result)
             
             # Collect results and save batches
-            t1 = time.time()
             all_subgraph_data = []
             all_augment_data = []
             
-            for subgraph_data_list, augment_data_list, subgraph_count_sample, augment_count_sample in results:
+            for subgraph_data_list, augment_data_list, _, _ in results:
                 all_subgraph_data.extend(subgraph_data_list)
                 all_augment_data.extend(augment_data_list)
-                subgraph_count += subgraph_count_sample
             
             # Save subgraphs in batches
             for i in range(0, len(all_subgraph_data), self.batch_size):
                 batch = all_subgraph_data[i:i+self.batch_size]
-                torch.save(batch, os.path.join(self.processed_dir, f"batch_{global_batch_counter}.pt"))
+                fname = f"batch_{global_batch_counter}.pt"
+                torch.save(batch, os.path.join(self.processed_dir, fname))
+                manifest["batches"].append({"file": fname, "len": len(batch)})
                 global_batch_counter += 1
+                subgraph_count += len(batch)
             
-            # Save augmentation data in batches
-            if len(all_augment_data) > 0:
-                for i in range(0, len(all_augment_data), self.batch_size):
-                    batch = all_augment_data[i:i+self.batch_size]
-                    torch.save(batch, os.path.join(self.processed_dir, f"aug_batch_{global_aug_batch_counter}.pt"))
-                    global_aug_batch_counter += 1
-                    subgraph_count += len(batch)
-                    
-        total_time = time.time() - total_start_time
-        print(f"\nDataset processing completed in {total_time:.3f}s ({total_time/60:.1f} minutes)")
+            for i in range(0, len(all_augment_data), self.batch_size):
+                batch = all_augment_data[i:i+self.batch_size]
+                fname = f"aug_batch_{global_aug_batch_counter}.pt"
+                torch.save(batch, os.path.join(self.processed_dir, fname))
+                manifest["augment_batches"].append({"file": fname, "len": len(batch)})
+                global_aug_batch_counter += 1
+                subgraph_count += len(batch)
+
+        manifest_path = Path(self.processed_dir) / "manifest.json"
+        tmp_path = manifest_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(manifest, f)
+        os.replace(tmp_path, manifest_path) 
+                
         print(f"Total subgraphs created: {subgraph_count}")
 
     def _process_single_sample(self, args):
@@ -408,34 +406,24 @@ class SpatialAgingCellDataset(Dataset):
         """
         sid, sid_idx, adata, gene_names, rfi, raw_filepath = args
         
-        sample_start_time = time.time()
         print(f"    Sample {sid_idx+1}: {sid} (PID: {os.getpid()})")
         
         # subset to each sample
-        t1 = time.time()
         sub_adata = adata[(adata.obs[self.sub_id]==sid)]
-        print(f"      Sample subsetting: {time.time() - t1:.3f}s")
         
         # Delaunay triangulation with pruning of > 200um distances
-        t1 = time.time()
         build_spatial_graph(sub_adata, method="delaunay")
         sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
         sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
-        print(f"      Spatial graph building: {time.time() - t1:.3f}s")
         
         edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
-        print(f"      PyG conversion: {time.time() - t1:.3f}s")
         
         ### Construct Node Labels
-        t1 = time.time()
         if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
             raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
         
         # Check if perturbation mask exists and use it for expression features
-        use_perturbation_expression = False
-        if self.perturbation_mask_key in sub_adata.obs.keys():
-            use_perturbation_expression = True
-            print(f"Using perturbation mask from {self.perturbation_mask_key}")
+        use_perturbation_expression = self.perturbation_mask_key in sub_adata.obsm.keys()
         
         if "celltype" in self.node_feature:
             # get cell type one hot encoding
@@ -446,7 +434,7 @@ class SpatialAgingCellDataset(Dataset):
             # get spatial expression - use perturbation mask if available
             if use_perturbation_expression:
                 # Use perturbation mask values instead of original expression
-                perturbation_expression = np.array([sub_adata.obs[self.perturbation_mask_key].iloc[i] for i in range(sub_adata.shape[0])])
+                perturbation_expression = sub_adata.obsm[self.perturbation_mask_key]
                 
                 # Reshape to match gene dimensions if needed
                 if len(perturbation_expression.shape) == 1:
@@ -483,26 +471,10 @@ class SpatialAgingCellDataset(Dataset):
             node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
         
         if "X_spatial" in sub_adata.obsm:
-            precomputed_embed = torch.tensor(sub_adata.obsm["spatial"]).float()
+            precomputed_embed = torch.tensor(sub_adata.obsm["X_spatial"]).float()
             node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
-        
-        # If using embeddings, build embedding matrix for all cells in sub_adata
-        if self.cell_embeddings is not None:
-            emb_dim = len(next(iter(self.cell_embeddings.values())))
-            emb_matrix = np.zeros((sub_adata.shape[0], emb_dim), dtype=np.float32)
-            for i, cid in enumerate(sub_adata.obs_names):
-                if cid in self.cell_embeddings:
-                    emb_matrix[i] = self.cell_embeddings[cid]
-                else:
-                    emb_matrix[i] = np.zeros(emb_dim, dtype=np.float32)
-            emb_tensor = torch.tensor(emb_matrix).float()
-        else:
-            emb_tensor = None
-        
-        print(f"      Node label construction: {time.time() - t1:.3f}s")
-        
+                
         ### Get Indices of Random Center Cells
-        t1 = time.time()
         cell_idxs = []
         
         if self.center_celltypes == "all":
@@ -517,11 +489,9 @@ class SpatialAgingCellDataset(Dataset):
                                     replace=False)
             cell_idxs = np.concatenate((cell_idxs, idxs))
         
-        print(f"      Center cell selection: {time.time() - t1:.3f}s")
         print(f"      Selected {len(cell_idxs)} center cells")
         
         ### Extract K-hop Subgraphs
-        t1 = time.time()
         
         graph_labels = [] # for computing quantiles later
         subgraph_data_list = []
@@ -548,7 +518,7 @@ class SpatialAgingCellDataset(Dataset):
                 if self.inject_feature is None:
                     subgraph_data = Data(x = sub_node_labels,
                                          edge_index = sub_edge_index,
-                                         y = torch.tensor(graph_label),
+                                         y = torch.tensor([graph_label]).flatten(),
                                          center_node = center_id,
                                          center_celltype = subgraph_cct,
                                          celltypes = subgraph_cts,
@@ -561,7 +531,7 @@ class SpatialAgingCellDataset(Dataset):
                 else:
                     subgraph_data = Data(x = sub_node_labels,
                                      edge_index = sub_edge_index,
-                                     y = torch.tensor(graph_label),
+                                     y = torch.tensor([graph_label]).flatten(),
                                          center_node = center_id,
                                          center_celltype = subgraph_cct,
                                          celltypes = subgraph_cts,
@@ -575,7 +545,6 @@ class SpatialAgingCellDataset(Dataset):
                 
                 subgraph_data_list.append(subgraph_data)
         
-        print(f"      Subgraph extraction: {time.time() - t1:.3f}s")
         print(f"      Created {len(subgraph_data_list)} subgraphs")
         
         ### Selective Graph Augmentation
@@ -584,7 +553,6 @@ class SpatialAgingCellDataset(Dataset):
         
         # get augmentation indices
         if self.augment_hop > 0:
-            t1 = time.time()
             augment_idxs = []
             for cidx in cell_idxs:
                 # get subgraph and get node indices of all nodes
@@ -606,10 +574,8 @@ class SpatialAgingCellDataset(Dataset):
             else:
                 absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
             
-            print(f"      Augmentation setup: {time.time() - t1:.3f}s")
             
             # get subgraphs and save for augmentation
-            t1 = time.time()
             
             for cidx in augment_idxs:               
                 # get subgraph
@@ -638,9 +604,9 @@ class SpatialAgingCellDataset(Dataset):
                     if self.inject_feature is None:
                         subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
-                                             y = torch.tensor(graph_label),
+                                             y = torch.tensor([graph_label]).flatten(),
                                              center_node = center_id,
-                                             center_celltype = subgraph_cct,
+                                             center_celltype = subgraph_cct,    
                                              celltypes = subgraph_cts,
                                              region = subgraph_region,
                                              age = subgraph_age,
@@ -651,7 +617,7 @@ class SpatialAgingCellDataset(Dataset):
                     else:
                         subgraph_data = Data(x = sub_node_labels,
                                              edge_index = sub_edge_index,
-                                             y = torch.tensor(graph_label),
+                                             y = torch.tensor([graph_label]).flatten(),
                                              center_node = center_id,
                                              center_celltype = subgraph_cct,
                                              celltypes = subgraph_cts,
@@ -666,16 +632,11 @@ class SpatialAgingCellDataset(Dataset):
                     augment_data_list.append(subgraph_data)
                     augment_count += 1
             
-            print(f"      Augmentation processing: {time.time() - t1:.3f}s")
             print(f"      Created {augment_count} augmented subgraphs")
         
-        sample_time = time.time() - sample_start_time
-        print(f"    Sample {sid} completed in {sample_time:.3f}s")
-        
-        return subgraph_data_list, augment_data_list, len(subgraph_data_list), augment_count
+        return subgraph_data_list, augment_data_list, len(subgraph_data_list), len(augment_data_list)
 
-    
-    def subgraph_from_index (self, cidx, edge_index, node_labels, sub_adata):
+    def subgraph_from_index(self, cidx, edge_index, node_labels, sub_adata):
         '''
         Method used by self.process to extract subgraph and properties based on a cell index (cidx) and edge_index and node_labels and sub_adata
         '''
@@ -716,79 +677,96 @@ class SpatialAgingCellDataset(Dataset):
         else:
             subgraph_cond = "no cohort specified"
         
-        
         return (sub_node_labels, sub_edge_index, graph_label, center_node_id, subgraph_cct, subgraph_cts, subgraph_region, subgraph_age, subgraph_cond)
 
     def len(self):
-        # Count total number of graphs across all batch files
-        total_graphs = 0
-        for f in os.listdir(self.processed_dir):
-            if f.endswith('.pt'):
-                batch_file = os.path.join(self.processed_dir, f)
-                batch_data = torch.load(batch_file, weights_only=False)
-                total_graphs += len(batch_data)
-        return total_graphs
-
-    def get(self, idx):
-        # Cache batch information to avoid reloading every time
-        if not hasattr(self, '_batch_cache'):
+        if not hasattr(self, "_batch_cache"):
             self._batch_cache = self._build_batch_cache()
-        
-        batch_info = self._batch_cache
-        total_items = batch_info['total_items']
-        batch_offsets = batch_info['batch_offsets']
-        all_batch_files = batch_info['all_batch_files']
-        
-        if idx >= total_items:
+        return self._batch_cache["total_items"]
+
+    def get(self, idx: int):
+        if not hasattr(self, "_batch_cache"):
+            self._batch_cache = self._build_batch_cache()
+
+        info = self._batch_cache
+        total_items   = info["total_items"]
+        batch_offsets = info["batch_offsets"]
+        batch_sizes   = info["batch_sizes"]
+        all_files     = info["all_batch_files"]
+
+        # Support negative indices
+        if idx < 0:
+            idx += total_items
+        if not (0 <= idx < total_items):
             raise IndexError(f"Index {idx} out of range (total items: {total_items})")
-        
-        # Find which batch contains this index
-        batch_idx = 0
-        for i, offset in enumerate(batch_offsets):
-            batch_size = batch_info['batch_sizes'][i]
-            if idx < offset + batch_size:
+
+        batch_idx = None
+        for i, start in enumerate(batch_offsets):
+            end = start + batch_sizes[i]
+            if start <= idx < end:
                 batch_idx = i
                 break
-        
-        batch_file = os.path.join(self.processed_dir, all_batch_files[batch_idx])
-        batch_data = torch.load(batch_file, weights_only=False)
+        if batch_idx is None:
+            raise RuntimeError(f"Could not locate idx {idx} in batch spans.")
+
+        batch_file = os.path.join(self.processed_dir, all_files[batch_idx])
+        batch_data = torch.load(batch_file, map_location="cpu", weights_only=False)
         local_idx = idx - batch_offsets[batch_idx]
-        
-        return batch_data[local_idx]
-    
+
+        try:
+            return batch_data[local_idx]
+        except Exception as e:
+            raise IndexError(
+                f"Batch {batch_idx} ({batch_file}) length < needed index {local_idx}. "
+                f"Original error: {e}"
+            )
+
     def _build_batch_cache(self):
-        """Build cache of batch information to avoid reloading files repeatedly."""
-        batch_files = []
-        aug_batch_files = []
-        
-        for f in os.listdir(self.processed_dir):
-            if f.startswith('batch_') and f.endswith('.pt'):
-                batch_files.append(f)
-            elif f.startswith('aug_batch_') and f.endswith('.pt'):
-                aug_batch_files.append(f)
-        
-        # Sort files by their batch number
-        batch_files.sort(key=lambda x: int(x.split('_')[1].split('.')[0]))
-        aug_batch_files.sort(key=lambda x: int(x.split('_')[2].split('.')[0]))
-        
-        # Combine all batch files in order: regular batches first, then augmentation batches
-        all_batch_files = batch_files + aug_batch_files
-        
-        # Calculate the actual total length by loading each batch and counting items
-        total_items = 0
-        batch_offsets = []
+        """Build cache from manifest.json"""
+        pdir = Path(self.processed_dir)
+        manifest_path = pdir / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Missing manifest.json at {manifest_path}")
+
+        with open(manifest_path, "r") as f:
+            mf = json.load(f)
+
+        entries = []
+        entries.extend(mf.get("batches", []))
+        entries.extend(mf.get("augment_batches", []))
+
+        all_batch_files = []
         batch_sizes = []
-        for batch_file in all_batch_files:
-            batch_path = os.path.join(self.processed_dir, batch_file)
-            batch_data = torch.load(batch_path, weights_only=False)
+
+        for entry in entries:
+            fname = entry["file"]
+            len = int(entry["len"])
+            fpath = pdir / fname
+            if not fpath.exists():
+                raise RuntimeError(f"Manifest references missing file: {fname}")
+            if len < 0:
+                raise RuntimeError(f"Invalid item count in manifest for {fname}: {len}")
+            all_batch_files.append(fname)
+            batch_sizes.append(len)
+
+        # Compute offsets and totals
+        batch_offsets = []
+        total_items = 0
+        for len in batch_sizes:
             batch_offsets.append(total_items)
-            batch_size = len(batch_data)
-            batch_sizes.append(batch_size)
-            total_items += batch_size
-        
+            total_items += len
+
+        # Light validation
+        if not (len(batch_offsets) == len(batch_sizes) == len(all_batch_files)):
+            raise ValueError("batch_offsets, batch_sizes, all_batch_files must have equal length")
+        if sum(batch_sizes) != total_items:
+            raise ValueError("Sum of batch_sizes must equal total_items")
+        if any(batch_offsets[i] >= batch_offsets[i+1] for i in range(len(batch_offsets)-1)):
+            raise ValueError("batch_offsets must be strictly increasing")
+
         return {
-            'total_items': total_items,
-            'batch_offsets': batch_offsets,
-            'batch_sizes': batch_sizes,
-            'all_batch_files': all_batch_files
+            "total_items": total_items,
+            "batch_offsets": batch_offsets,
+            "batch_sizes": batch_sizes,
+            "all_batch_files": all_batch_files,
         }

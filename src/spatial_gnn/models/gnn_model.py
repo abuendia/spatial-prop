@@ -1,6 +1,7 @@
 import numpy as np
-from tqdm import tqdm
 from scipy.sparse import issparse
+import time
+from tqdm import tqdm
 
 import torch
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
@@ -93,9 +94,10 @@ def bmc_loss(pred, target, noise_var):
     if target.shape != pred.shape:
         target = torch.reshape(target, pred.shape)
     
-    I = torch.eye(pred.shape[-1])
-    logits = MVN(pred.unsqueeze(1), noise_var*I).log_prob(target.unsqueeze(0))  # logit size: [batch, batch]
-    loss = F.cross_entropy(logits, torch.arange(pred.shape[0]))     # contrastive-like loss
+    I = torch.eye(pred.shape[-1], device=pred.device, dtype=pred.dtype)
+    targets = torch.arange(pred.shape[0], device=pred.device, dtype=torch.long)
+    logits = MVN(pred.unsqueeze(1), noise_var * I).log_prob(target.unsqueeze(0))
+    loss = F.cross_entropy(logits, targets)
     loss = loss * (2 * noise_var).detach()  # optional: restore the loss scale, 'detach' when noise is learnable 
     
     return loss
@@ -180,19 +182,18 @@ class WeightedL1Loss(_Loss):
 def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
     model.train()
 
-    for data in loader:  
-        for batch in data:
-            batch.to(device)
-            if inject is False:
-                out = model(batch.x, batch.edge_index, batch.batch, None)  # Perform a single forward pass.
-            else:
-                out = model(batch.x, batch.edge_index, batch.batch, batch.inject) # Perform a single forward pass.
-            
-            loss = criterion(out, batch.y)  # Compute the loss.
-                    
-            loss.backward()  # Derive gradients.
-            optimizer.step()  # Update parameters based on gradients.
-            optimizer.zero_grad()  # Clear gradients.
+    for batch in loader:  
+        batch.to(device)
+        if inject is False:
+            out = model(batch.x, batch.edge_index, batch.batch, None)  # Perform a single forward pass.
+        else:
+            out = model(batch.x, batch.edge_index, batch.batch, batch.inject) # Perform a single forward pass.
+        
+        loss = criterion(out, batch.y)  # Compute the loss.
+                
+        loss.backward()  # Derive gradients.
+        optimizer.step()  # Update parameters based on gradients.
+        optimizer.zero_grad()  # Clear gradients.
 
     
 
@@ -200,28 +201,27 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
     model.eval()
 
     errors = []
-    for data in loader: 
-        for batch in data:
-            batch.to(device)
-            if inject is False:
-                out = model(batch.x, batch.edge_index, batch.batch, None)
-            else:
-                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
-            
-            if loss == "mse":
-                errors.append(F.mse_loss(out, batch.y.unsqueeze(1)).sqrt().item())
-            elif loss == "l1":
-                errors.append(F.l1_loss(out, batch.y.unsqueeze(1)).item())
-            elif loss == "weightedl1":
-                errors.append(weighted_l1_loss(out, batch.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
-            elif loss == "balanced_mse":
-                errors.append(bmc_loss(out, batch.y.unsqueeze(1), criterion.noise_sigma**2).item())
-            elif loss == "npcc":
-                errors.append(npcc_loss(out, batch.y.unsqueeze(1)).item())
+    for batch in loader: 
+        batch.to(device)
+        if inject is False:
+            out = model(batch.x, batch.edge_index, batch.batch, None)
+        else:
+            out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
+        
+        if loss == "mse":
+            errors.append(F.mse_loss(out, batch.y).sqrt().item())
+        elif loss == "l1":
+            errors.append(F.l1_loss(out, batch.y).item())
+        elif loss == "weightedl1":
+            errors.append(weighted_l1_loss(out, batch.y, criterion.zero_weight, criterion.nonzero_weight).item())
+        elif loss == "balanced_mse":
+            errors.append(bmc_loss(out, batch.y, criterion.noise_sigma**2).item())
+        elif loss == "npcc":
+            errors.append(npcc_loss(out, batch.y).item())
 
     return np.mean(errors)  # Derive ratio of correct predictions.
 
-def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="perturbation_mask"):
+def predict(model, dataloader, adata, device="cuda"):
     """
     Run GNN model predictions and convert back to AnnData format using the stored mapping info.
     
@@ -240,10 +240,7 @@ def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="pert
     --------
     AnnData
         Updated AnnData with predictions in .X
-    """
-    import time
-    from tqdm import tqdm
-    
+    """    
     model.eval()
     
     # Create prediction matrix with same shape as original
@@ -253,55 +250,37 @@ def predict(model, dataloader, adata, device="cuda", perturbation_mask_key="pert
     # Track which cells have been predicted
     predicted_cells = set()
     
-    batch_count = 0
-    total_start_time = time.time()
-    
+    batch_count = 0    
     print(f"Starting prediction for {n_cells} cells, {n_genes} genes")
     
     with torch.no_grad():
-        for data in tqdm(dataloader, desc="Processing data groups"):
-            for batch in data:
-                batch_count += 1
-                
-                # Data loading and transfer to GPU
-                batch.to(device)
-                
-                # Model inference
-                if hasattr(batch, 'inject') and batch.inject is not None:
-                    out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
-                else:
-                    out = model(batch.x, batch.edge_index, batch.batch, None)
-                
-                # Data transfer back to CPU
-                batch_predictions = out.cpu().numpy()
-                
-                # Mapping predictions
-                for i, pred in enumerate(batch_predictions):
-                    original_cell_idx = batch.original_cell_idx[i].item()
-                    original_cell_id = batch.original_cell_id[i]
-                    
-                    # Map predictions to the correct cell and genes
-                    if len(pred) == n_genes:
-                        prediction_matrix[original_cell_idx, :] = pred
-                    else:
-                        print(f"Warning: Prediction dimension {len(pred)} doesn't match genes {n_genes}")
-                        prediction_matrix[original_cell_idx, :len(pred)] = pred[:n_genes]
-                    
-                    predicted_cells.add(original_cell_idx)
+        for batch in tqdm(dataloader, desc="Processing data groups"):
+            batch_count += 1
             
-                print(f"Batch {batch_count}: {time.time() - total_start_time:.3f}s total")
-
+            batch.to(device)
+            
+            if hasattr(batch, 'inject') and batch.inject is not None:
+                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
+            else:
+                out = model(batch.x, batch.edge_index, batch.batch, None)
+            
+            batch_predictions = out.cpu().numpy()
+            
+            for i, pred in enumerate(batch_predictions):
+                original_cell_idx = batch.original_cell_idx[i].item()
+                
+                if len(pred) == n_genes:
+                    prediction_matrix[original_cell_idx, :] = pred
+                else:
+                    raise ValueError(f"Prediction dimension {len(pred)} doesn't match genes {n_genes}")
+                predicted_cells.add(original_cell_idx)
+        
     # Final summary
-    print(f"\n=== FINAL SUMMARY ===")
-    print(f"Total time: {time.time() - total_start_time:.3f}s")
     print(f"Processed {batch_count} batches")
-    print(f"Average time per batch: {time.time() - total_start_time/batch_count:.3f}s")
 
-    # Calculate perturbation effects as difference between predicted and original
     original_expression = adata.X.toarray() if issparse(adata.X) else adata.X
     perturbation_effects = prediction_matrix - original_expression
     
-    # Save both predicted values and perturbation effects
     adata.layers['predicted_perturbed'] = prediction_matrix
     adata.layers['perturbation_effects'] = perturbation_effects
     print(f"Predicted {len(predicted_cells)} cells out of {n_cells} total cells")

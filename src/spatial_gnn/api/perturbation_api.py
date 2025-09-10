@@ -26,7 +26,7 @@ from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 def create_perturbation_mask(
     adata: ad.AnnData,
     perturbation_dict: Dict[str, Dict[str, float]],
-    mask_key: str = 'perturbation_mask',
+    mask_key: str = 'perturbed_input',
     save_path: Optional[str] = None
 ) -> str:
     """
@@ -38,7 +38,7 @@ def create_perturbation_mask(
         Input AnnData object
     perturbation_dict : Dict[str, Dict[str, float]]
         Dictionary specifying perturbations
-    mask_key : str, default='perturbation_mask'
+    mask_key : str, default='perturbed_input'
         Key to store the perturbation mask in adata.obsm
     save_dir : Optional[str], default=None
         Directory to save the file. If None, uses current working directory.
@@ -49,7 +49,7 @@ def create_perturbation_mask(
         Path to the saved AnnData file with perturbation mask
     """
     # Create perturbation mask
-    perturbation_mask = np.ones((adata.shape[0], adata.shape[1]))
+    perturbed = np.ones((adata.shape[0], adata.shape[1]))
     
     # Check if celltype column exists
     if 'celltype' not in adata.obs.columns:
@@ -71,13 +71,18 @@ def create_perturbation_mask(
         for gene_name, multiplier in gene_multipliers.items():
             if gene_name in adata.var_names:
                 gene_idx = adata.var_names.get_loc(gene_name)
-                perturbation_mask[cell_indices, gene_idx] = multiplier * adata.X[cell_indices, gene_idx]
+                vals = adata.X[cell_indices, gene_idx]
+                if issparse(vals): 
+                    vals = vals.A.ravel()
+                else: 
+                    vals = np.asarray(vals).ravel()
+                perturbed[cell_indices, gene_idx] = multiplier * vals
                 print(f"  - Gene '{gene_name}': multiplier = {multiplier}")
             else:
                 print(f"Warning: Gene '{gene_name}' not found in data")
     
     # Add the perturbation mask to the AnnData
-    adata.obsm[mask_key] = perturbation_mask
+    adata.obsm[mask_key] = perturbed
     
     # Save to file if path is provided
     if save_path is not None:
@@ -95,13 +100,13 @@ def create_perturbation_mask(
     adata.uns['perturbation_info'] = perturbation_info
     
     print(f"\nPerturbation mask created:")
-    print(f"- Shape: {perturbation_mask.shape}")
+    print(f"- Shape: {perturbed.shape}")
     print(f"- Cell types affected: {perturbation_info['cell_types']}")
     print(f"- Cells affected: {perturbation_info['n_perturbed_cells']}")
     print(f"- Genes affected: {perturbation_info['perturbed_genes']}")
     print(f"- Mask stored in adata.obsm['{mask_key}']")
     
-    return save_path
+    return save_path    
 
 
 def train_perturbation_model(
@@ -111,7 +116,7 @@ def train_perturbation_model(
     augment_hop: int = 2,
     center_celltypes: str = "all",
     node_feature: str = "expression",
-    inject_feature: str = "None",
+    inject_feature: Optional[str] = None,
     gene_list: Optional[str] = None,
     num_cells_per_ct_id: int = 100,
     normalize_total: bool = True,
@@ -140,7 +145,7 @@ def train_perturbation_model(
         Cell types to center graphs on (comma-separated or "all")
     node_feature : str, default="expression"
         Node feature type
-    inject_feature : str, default="None"
+    inject_feature : Optional[str], default=None
         Feature injection type
     gene_list : Optional[str], default=None
         Path to gene list file
@@ -194,7 +199,7 @@ def predict_perturbation_effects(
     model_path: str,
     exp_name: str,
     perturbation_dict: Dict[str, Dict[str, float]],
-    perturbation_mask_key: str = 'perturbation_mask',
+    perturbation_mask_key: str = 'perturbed_input',
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     **kwargs
 ) -> ad.AnnData:
@@ -217,7 +222,7 @@ def predict_perturbation_effects(
         - Keys: cell type names
         - Values: dictionaries with gene names as keys and multipliers as values
         Example: {'T cell': {'Igf2': 0.0}, 'NSC': {'Sox9': 2.0}}
-    perturbation_mask_key : str, default='perturbation_mask'
+    perturbation_mask_key : str, default='perturbed_input'
         Key to store the perturbation mask in adata.obsm
     device : str, default="cuda" if available else "cpu"
         Device to run the model on
@@ -248,7 +253,7 @@ def predict_perturbation_effects(
     
     # Create perturbation mask and apply it to the data
     print("Creating perturbation mask...")
-    create_perturbation_mask(adata, perturbation_dict, mask_key=perturbation_mask_key)
+    create_perturbation_mask(adata, perturbation_dict, mask_key=perturbation_mask_key, save_path=adata_path)
     
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
@@ -262,7 +267,7 @@ def predict_perturbation_effects(
         inject_feature=model_config["inject_feature"],
         num_cells_per_ct_id=model_config["num_cells_per_ct_id"],
         center_celltypes=model_config["center_celltypes"],
-        use_ids=model_config["test_ids"] if model_config["test_ids"] is not None else True,
+        use_ids=model_config.get("test_ids", None),
         raw_filepaths=[adata_path],
         celltypes_to_index=model_config["celltypes_to_index"],
         normalize_total=model_config["normalize_total"],
@@ -272,9 +277,10 @@ def predict_perturbation_effects(
     
     # Load batch files the same way as training
     all_inference_data = []
-    for f in inference_dataset.processed_file_names:
-        all_inference_data.append(torch.load(os.path.join(inference_dataset.processed_dir, f), weights_only=False))
-    
+    for f in tqdm.tqdm(inference_dataset.processed_file_names):
+        batch_list = torch.load(os.path.join(inference_dataset.processed_dir, f), weights_only=False)
+        all_inference_data.extend(batch_list)
+
     inference_dataloader = DataLoader(all_inference_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
     print(f"Created {len(all_inference_data)} batch files from input data")
 
@@ -320,96 +326,31 @@ def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
     return summary_df
 
 
-def visualize_perturbation_effects(
-    adata: ad.AnnData,
-    genes: Optional[List[str]] = None,
-    n_genes: int = 10,
-    save_path: Optional[str] = None
-) -> None:
-    """
-    Visualize perturbation effects.
-    
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        AnnData object with perturbation results
-    genes : Optional[List[str]], default=None
-        Specific genes to visualize
-    n_genes : int, default=10
-        Number of top affected genes to show if genes is None
-    save_path : Optional[str], default=None
-        Path to save the visualization
-    """
-    
-    if 'perturbation_effects' not in adata.layers:
-        raise ValueError("No perturbation effects found in adata.layers")
-    
-    effects = adata.layers['perturbation_effects']
-    
-    if genes is None:
-        # Select top affected genes
-        mean_effects = np.abs(np.mean(effects, axis=0))
-        top_indices = np.argsort(mean_effects)[-n_genes:]
-        genes = adata.var_names[top_indices].tolist()
-    
-    
-    
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    
-    # Plot 1: Mean effects by gene
-    gene_effects = np.mean(effects, axis=0)
-    gene_indices = [adata.var_names.get_loc(gene) for gene in genes if gene in adata.var_names]
-    axes[0, 0].bar(range(len(gene_indices)), gene_effects[gene_indices])
-    axes[0, 0].set_title('Mean Perturbation Effects by Gene')
-    axes[0, 0].set_xticks(range(len(gene_indices)))
-    axes[0, 0].set_xticklabels(genes, rotation=45)
-    
-    # Plot 2: Distribution of effects
-    axes[0, 1].hist(gene_effects, bins=50, alpha=0.7)
-    axes[0, 1].set_title('Distribution of Mean Effects')
-    axes[0, 1].set_xlabel('Mean Effect')
-    axes[0, 1].set_ylabel('Frequency')
-    
-    # Plot 3: Spatial visualization (if spatial coordinates available)
-    if 'spatial' in adata.obsm:
-        scatter = axes[1, 0].scatter(
-            adata.obsm['spatial'][:, 0],
-            adata.obsm['spatial'][:, 1],
-            c=adata.obs.get('perturbation_mask', False),
-            cmap='viridis',
-            alpha=0.6
-        )
-        axes[1, 0].set_title('Perturbed Cells (Spatial)')
-        axes[1, 0].set_xlabel('X coordinate')
-        axes[1, 0].set_ylabel('Y coordinate')
-        plt.colorbar(scatter, ax=axes[1, 0])
-    
-    # Plot 4: Effect magnitude by cell type
-    if 'celltype' in adata.obs.columns:
-        celltype_effects = []
-        celltype_labels = []
-        for celltype in adata.obs['celltype'].unique():
-            mask = adata.obs['celltype'] == celltype
-            if mask.sum() > 0:
-                celltype_effects.append(np.mean(np.abs(effects[mask])))
-                celltype_labels.append(celltype)
-        
-        axes[1, 1].bar(range(len(celltype_effects)), celltype_effects)
-        axes[1, 1].set_title('Mean Effect Magnitude by Cell Type')
-        axes[1, 1].set_xticks(range(len(celltype_effects)))
-        axes[1, 1].set_xticklabels(celltype_labels, rotation=45)
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    
-    plt.show() 
-
-
 if __name__ == "__main__":
     train_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
     test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"  # Using same data for demo
+    
+    # Define perturbations
+    # perturbation_dict = {
+    #     'T cell': {'Igf2': 0.0},  
+    #     'NSC': {'Sox9': 2.0},         
+    #     'Pericyte': {'Ccl4': 0.5}    
+    # }
+    
+    # print("=== Training a new perturbation model ===")
+    # model, model_config, model_path = train_perturbation_model(
+    #     adata_path=train_data_path,
+    #     exp_name="api_run",
+    #     k_hop=2,
+    #     augment_hop=2,
+    #     center_celltypes="T cell,NSC,Pericyte",
+    #     node_feature="expression",
+    #     inject_feature="None",
+    #     num_cells_per_ct_id=100,
+    #     epochs=10,
+    #     debug=True,
+    #     debug_subset_size=10,
+    # )
     
     # Define perturbations
     perturbation_dict = {
@@ -417,20 +358,9 @@ if __name__ == "__main__":
         'NSC': {'Sox9': 2.0},         
         'Pericyte': {'Ccl4': 0.5}    
     }
-    
-    print("=== Training a new perturbation model ===")
-    model, model_config, model_path = train_perturbation_model(
-        adata_path=train_data_path,
-        exp_name="api_run",
-        k_hop=2,
-        augment_hop=2,
-        center_celltypes="T cell,NSC,Pericyte",
-        node_feature="expression",
-        inject_feature="None",
-        num_cells_per_ct_id=100,
-        epochs=10,
-    )
-    
+    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/api_run_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_TNP_NoneInject/DEBUG_weightedl1_1en04/best_model.pth"
+
+
     test_adata = sc.read_h5ad(test_data_path)
     test_data_path_perturbed = create_perturbation_mask(test_adata, perturbation_dict, save_path=test_data_path)
 
@@ -440,13 +370,6 @@ if __name__ == "__main__":
         exp_name="api_run",
         model_path=model_path,
         perturbation_dict=perturbation_dict,
-        perturbation_mask_key="perturbation_mask"
+        perturbation_mask_key="perturbed_input"
     )
-    
-    # print("=== Visualizing perturbation effects ===")
-    # visualize_perturbation_effects(adata_perturbed)
-    
-    # print("=== Getting perturbation summary ===")
-    # perturbation_summary = get_perturbation_summary(adata_perturbed)
-    # print(perturbation_summary)
-    
+    adata_perturbed.write("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed/aging_coronal_perturbed_result.h5ad")

@@ -20,11 +20,11 @@ def train_model_from_scratch(
     augment_hop: int,
     center_celltypes: Union[str, List[str], None],
     node_feature: str,
-    inject_feature: Optional[str],
     learning_rate: float,
     loss: str,
     epochs: int,
     num_cells_per_ct_id: int,
+    inject_feature: Optional[str] = None,
     dataset: Optional[str] = None,
     base_path: Optional[str] = None,
     exp_name: Optional[str] = None,
@@ -128,7 +128,9 @@ def train_model_from_scratch(
         raw_filepaths=[file_path],
         gene_list=gene_list,
         celltypes_to_index=celltypes_to_index,
-        normalize_total=normalize_total
+        normalize_total=normalize_total,
+        debug=debug,
+        use_mp=False,
     )
 
     test_dataset = SpatialAgingCellDataset(
@@ -145,7 +147,9 @@ def train_model_from_scratch(
         raw_filepaths=[file_path],
         gene_list=gene_list,
         celltypes_to_index=celltypes_to_index,
-        normalize_total=normalize_total
+        normalize_total=normalize_total,
+        debug=debug,
+        use_mp=False,
     )
     
     # Process datasets
@@ -181,14 +185,18 @@ def train_model_from_scratch(
         train_files = train_dataset.processed_file_names
         test_files = test_dataset.processed_file_names
     
+    all_train_data = []
     for f in tqdm.tqdm(train_files):
-        all_train_data.append(torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False))
+        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)  # list[Data]
+        all_train_data.extend(batch_list)
 
+    all_test_data = []
     for f in tqdm.tqdm(test_files):
-        all_test_data.append(torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False))
-
+        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
+        all_test_data.extend(batch_list)
+    
     train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
     print(f"Train samples: {len(all_train_data)}", flush=True)
     print(f"Test samples: {len(all_test_data)}", flush=True)
@@ -236,7 +244,7 @@ def train_model_from_scratch(
 
     # Training loop
     print(f"Starting training for {epochs} epochs...")
-    best_mse = np.inf
+    best_score = np.inf
     training_results = {"metric": loss, "epoch": [], "train": [], "test": []}
 
     # Create directory to save results
@@ -244,11 +252,7 @@ def train_model_from_scratch(
     if debug:
         exp_dir_name = f"DEBUG_{exp_dir_name}"
     
-    model_dirname = loss + f"_{learning_rate:.0e}".replace("-", "n")
-    if debug:
-        model_dirname = f"DEBUG_{model_dirname}"
-    
-    save_dir = os.path.join("results/gnn", train_dataset.processed_dir.split("/")[-2], model_dirname)
+    save_dir = os.path.join("results/gnn", train_dataset.processed_dir.split("/")[-2], exp_dir_name)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -257,29 +261,29 @@ def train_model_from_scratch(
         train(model, train_loader, criterion, optimizer, inject=inject, device=device)
         
         # Evaluation
-        train_mse = test(model, train_loader, loss, criterion, inject=inject, device=device)
-        test_mse = test(model, test_loader, loss, criterion, inject=inject, device=device)
+        train_score = test(model, train_loader, loss, criterion, inject=inject, device=device)
+        test_score = test(model, test_loader, loss, criterion, inject=inject, device=device)
         
         # Save best model
-        if test_mse < best_mse:
+        if test_score < best_score:
             torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pth"))
-            best_mse = test_mse
+            best_score = test_score
         
         # Log results
         if loss == "mse":
-            print(f'Epoch: {epoch:03d}, Train MSE: {train_mse:.4f}, Test MSE: {test_mse:.4f}', flush=True)
+            print(f'Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}', flush=True)
         elif loss == "l1":
-            print(f'Epoch: {epoch:03d}, Train L1: {train_mse:.4f}, Test L1: {test_mse:.4f}', flush=True)
+            print(f'Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}', flush=True)
         elif loss == "weightedl1":
-            print(f'Epoch: {epoch:03d}, Train WL1: {train_mse:.4f}, Test WL1: {test_mse:.4f}', flush=True)
+            print(f'Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}', flush=True)
         elif loss == "balanced_mse":
-            print(f'Epoch: {epoch:03d}, Train BMC: {train_mse:.4f}, Test BMC: {test_mse:.4f}', flush=True)
+            print(f'Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}', flush=True)
         elif loss == "npcc":
-            print(f'Epoch: {epoch:03d}, Train NPCC: {train_mse:.4f}, Test NPCC: {test_mse:.4f}', flush=True)
+            print(f'Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}', flush=True)
             
         training_results["epoch"].append(epoch)
-        training_results["train"].append(train_mse)    
-        training_results["test"].append(test_mse)
+        training_results["train"].append(train_score)    
+        training_results["test"].append(test_score)
 
     # Save final model
     final_model_path = os.path.join(save_dir, "model.pth")
