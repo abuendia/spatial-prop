@@ -11,4 +11,5 @@ CUDA_VISIBLE_DEVICES=0 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --loss "weightedl1" \
     --epochs 50 \
     --do_train_from_scratch \
+    --do_eval \
     --debug

@@ -13,6 +13,7 @@ from torch_geometric.loader import DataLoader
 from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
+from spatial_gnn.scripts.model_performance import eval_model
 
 
 def train_model_from_scratch(
@@ -311,7 +312,7 @@ def train_model_from_scratch(
         pickle.dump(training_results, f)
     print("Training logs saved")
 
-    return model, model_config, final_model_path
+    return model, model_config, final_model_path, test_loader, save_dir
 
 
 def main():
@@ -337,6 +338,7 @@ def main():
     parser.add_argument("--normalize_total", action='store_true')
     parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
     parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--do_eval", action='store_true', help="Enable evaluation mode")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     
@@ -354,7 +356,7 @@ def main():
     if args.anndata and args.base_path:
         parser.error("--base_path should not be specified when using --anndata")
 
-    train_model_from_scratch(
+    model, _, _, test_loader, save_dir = train_model_from_scratch(
         k_hop=args.k_hop,
         augment_hop=args.augment_hop,
         center_celltypes=args.center_celltypes,
@@ -377,6 +379,15 @@ def main():
         random_state=args.random_state,
         stratify_by=args.stratify_by
     )
+
+    if args.do_eval:
+        eval_model(
+            model=model,
+            test_loader=test_loader,
+            inject_feature=args.inject_feature,
+            save_dir=save_dir,
+            device=args.device
+        )
 
 
 if __name__ == "__main__":

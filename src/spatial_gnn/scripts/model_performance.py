@@ -21,7 +21,6 @@ from scipy.stats import pearsonr, spearmanr
 from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
 
 
 def main():
@@ -148,6 +147,17 @@ def main():
     model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth"), map_location=torch.device('cpu')))
     print(profile.count_parameters(model), flush=True)
 
+    eval_model(model, test_loader, inject_feature, save_dir, device)
+
+
+def eval_model(model, test_loader, inject_feature, save_dir, device="cuda"):
+
+    if inject_feature is not None and inject_feature.lower() == "none":
+        inject_feature = None
+        inject = False
+    else:
+        inject = True
+
     ### LOSS CURVES
     print("Plotting training and validation loss curves...", flush=True)
     
@@ -174,7 +184,6 @@ def main():
     print("Measuring model predictive performance bulk and by cell type...", flush=True)
 
     model.eval()
-    
     preds = []
     actuals = []
     celltypes = []
