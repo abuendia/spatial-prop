@@ -1,67 +1,35 @@
 import numpy as np
 import pandas as pd
-import scanpy as sc
-import squidpy as sq
-import anndata as ad
-from scipy.stats import pearsonr, spearmanr, ttest_ind
 import pickle
 import os
+import argparse
+from tqdm import tqdm
+
 import matplotlib.pyplot as plt
 import matplotlib
+import seaborn as sns
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
-from matplotlib.collections import PatchCollection
-from matplotlib.colors import ListedColormap
-import seaborn as sns
 sns.set_style("ticks")
-from sklearn.neighbors import BallTree
-from scipy.stats import mannwhitneyu, ttest_ind
-from statsmodels.stats.multitest import multipletests
-from decimal import Decimal
-import copy
-import json 
 
-import random
-
-#os.chdir("/oak/stanford/groups/jamesz/esun/GNNPerturbation/spatial-gnn/scripts")
-
-from aging_gnn_model import *
-
-import networkx as nx
-import argparse
 import torch
-import torch_geometric
-from torch_geometric.data import Data, Dataset
+from torch_geometric import profile
 from torch_geometric.loader import DataLoader
-from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
-from torch_geometric.utils.convert import from_scipy_sparse_matrix
-from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
-from torch.nn.modules.loss import _Loss
-from torch.distributions import MultivariateNormal as MVN
-
 from sklearn.metrics import r2_score
+from scipy.stats import pearsonr, spearmanr
 
+from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
+from spatial_gnn.models.gnn_model import GNN
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
 
-### Load in dataset configs
-
-def load_dataset_config():
-    """Load dataset configurations from JSON file."""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
 
 def main():
     # set up arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str, required=True)
     parser.add_argument("--base_path", help="Base path to the data directory", type=str, required=True)
+    parser.add_argument("--exp_name", help="Experiment name", type=str, required=True)
     parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
     parser.add_argument("--augment_hop", help="number of hops to take for graph augmentation", type=int, required=True)
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
@@ -77,7 +45,7 @@ def main():
     DATASET_CONFIGS = load_dataset_config()
     
     # set which model to use
-    use_model = "model" # "best_model"
+    use_model = "best_model"
 
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
@@ -93,13 +61,7 @@ def main():
     augment_hop = args.augment_hop
     
     # Handle center_celltypes
-    if args.center_celltypes.lower() == 'none':
-        center_celltypes = None
-    elif args.center_celltypes.lower() == 'all':
-        center_celltypes = 'all'
-    else:
-        center_celltypes = args.center_celltypes.split(",")
-    
+    center_celltypes = parse_center_celltypes(args.center_celltypes)
     node_feature = args.node_feature
     inject_feature = args.inject_feature
     learning_rate = args.learning_rate
@@ -116,23 +78,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device, flush=True)
 
-    # train
-    exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
-
     # Load gene list if provided
-    gene_list = None
-    if args.gene_list is not None:
-        try:
-            with open(args.gene_list, 'r') as f:
-                gene_list = [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
+    gene_list = parse_gene_list(args.gene_list)
 
     # Build cell type index
     celltypes_to_index = {}
     for ci, cellt in enumerate(dataset_config["celltypes"]):
         celltypes_to_index[cellt] = ci
-    
     
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
@@ -162,38 +114,40 @@ def main():
                                         raw_filepaths=[file_path],
                                         gene_list=gene_list,
                                         celltypes_to_index=celltypes_to_index)
-
+    
     test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(test_dataset), flush=True)
-
-
-    # init GNN model
+    
     if inject is True:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    inject_dim=int(train_dataset.get(0).inject.shape[1]), # added for injecting features into last layer (after pooling),
-                    method="GIN", pool="add", num_layers=k_hop)
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(train_dataset.get(0).x.shape[1]),
+            output_dim=len(train_dataset.get(0).y),
+            inject_dim=int(train_dataset.get(0).inject.shape[1]),
+            method="GIN", 
+            pool="add", 
+            num_layers=k_hop
+        )
     else:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    method="GIN", pool="add", num_layers=k_hop)
+        model = GNN(
+            hidden_channels=64,
+            input_dim=int(train_dataset.get(0).x.shape[1]),
+            output_dim=len(train_dataset.get(0).y),
+            method="GIN", 
+            pool="add", 
+            num_layers=k_hop
+        )
+
     model.to(device)
-    print(device, flush=True)
+    print(f"Model initialized on {device}")
 
     # create directory to save results
     model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
     save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
-    
-    ### RESULTS / VISUALIZATION ###
-    
-    # load model weights
-    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth"),
-                                    map_location=torch.device('cpu')))
-    from torch_geometric import profile
+
+    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth"), map_location=torch.device('cpu')))
     print(profile.count_parameters(model), flush=True)
-    
+
     ### LOSS CURVES
     print("Plotting training and validation loss curves...", flush=True)
     
@@ -211,7 +165,6 @@ def main():
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
     plt.tight_layout()
-    #plt.savefig(f"plots/gnn/{test_dataset.processed_dir.split('/')[-2]}_losscurves.pdf", bbox_inches='tight')
     plt.savefig(os.path.join(save_dir, "loss_curves.pdf"), bbox_inches='tight')
     plt.close()
     
@@ -219,7 +172,7 @@ def main():
 
     ### MODEL PERFORMANCE
     print("Measuring model predictive performance bulk and by cell type...", flush=True)
-    
+
     model.eval()
     
     preds = []
@@ -469,22 +422,20 @@ def main():
     plt.setp(ax.get_legend().get_texts(), fontsize='14')
     plt.setp(ax.get_legend().get_title(), fontsize='16')
     plt.tight_layout()
-    #plt.savefig("plots/expression_prediction_performance/"+save_dir.split("/")[-2]+"_GENE.pdf", bbox_inches='tight')
     plt.savefig(os.path.join(save_dir, "prediction_performance_GENE.pdf"))
     plt.close()
     
-    
     print("Finished cell type analysis.", flush=True)
     
-    print("DONE.", flush=True)
 
-def robust_nanmean (x):
+def robust_nanmean(x):
     nmx = np.nanmean(x) if np.count_nonzero(~np.isnan(x))>1 else np.mean(x)
     return (nmx)
 
-def robust_nanmedian (x):
+def robust_nanmedian(x):
     nmx = np.nanmedian(x) if np.count_nonzero(~np.isnan(x))>1 else np.median(x)
     return (nmx)
+
 
 if __name__ == "__main__":
     main()

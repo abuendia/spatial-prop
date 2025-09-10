@@ -9,6 +9,7 @@ import random
 import multiprocessing as mp
 from pathlib import Path
 import shutil
+from tqdm import tqdm
 
 import torch
 from torch_geometric.data import Data, Dataset
@@ -76,32 +77,13 @@ class SpatialAgingCellDataset(Dataset):
                  augment_cutoff=0,
                  dispersion_factor=0,
                  radius_cutoff=200,
-                 celltypes_to_index = {
-                                     'Neuron-Excitatory' : 0,
-                                     'Neuron-Inhibitory' : 1,
-                                     'Neuron-MSN' : 2, 
-                                     'Astrocyte' : 3, 
-                                     'Microglia' : 4, 
-                                     'Oligodendrocyte' : 5, 
-                                     'OPC' : 6,
-                                     'Endothelial' : 7, 
-                                     'Pericyte' : 8, 
-                                     'VSMC' : 9, 
-                                     'VLMC' : 10,
-                                     'Ependymal' : 11, 
-                                     'Neuroblast' : 12, 
-                                     'NSC' : 13,  
-                                     'Macrophage' : 14, 
-                                     'Neutrophil' : 15,
-                                     'T cell' : 16, 
-                                     'B cell' : 17,
-                                    },
+                 celltypes_to_index=None,
                  embedding_json=None,
                  genept_embeddings_path=None,
-                 perturbation_mask_key="perturbation_mask",
+                 perturbation_mask_key="perturbed_input",
                  batch_size=500,
-                 overwrite=True,
-                 debug=True,
+                 overwrite=False,
+                 debug=False,
                  use_mp=False,
                 ):
         self.root=root
@@ -285,16 +267,6 @@ class SpatialAgingCellDataset(Dataset):
             # load raw data
             adata = sc.read_h5ad(raw_filepath)
 
-            if self.use_ids is None:
-                sub_ids_arr = np.unique(adata.obs[self.sub_id])
-            elif self.use_ids[rfi] is None:
-                sub_ids_arr = np.unique(adata.obs[self.sub_id])
-            else:
-                sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
-
-            if self.debug:
-                sub_ids_arr = sub_ids_arr[:1]
-
             if issparse(adata.X):
                 adata.X = adata.X.toarray()
             
@@ -332,6 +304,10 @@ class SpatialAgingCellDataset(Dataset):
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids[rfi]))
             else:
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids))
+            
+            if self.debug:
+                sub_ids_arr = sub_ids_arr[:2]
+            
             print(f"  Processing {len(sub_ids_arr)} samples")
             
             # Process samples either with multiprocessing or sequentially
@@ -352,7 +328,7 @@ class SpatialAgingCellDataset(Dataset):
                 # Process samples sequentially
                 print(f"  Using sequential processing for {len(sub_ids_arr)} samples")
                 results = []
-                for sid_idx, sid in enumerate(sub_ids_arr):
+                for sid_idx, sid in tqdm(enumerate(sub_ids_arr), total=len(sub_ids_arr)):
                     sample_args = (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
                     result = self._process_single_sample(sample_args)
                     results.append(result)
@@ -740,29 +716,27 @@ class SpatialAgingCellDataset(Dataset):
 
         for entry in entries:
             fname = entry["file"]
-            len = int(entry["len"])
+            length = int(entry["len"])
             fpath = pdir / fname
             if not fpath.exists():
                 raise RuntimeError(f"Manifest references missing file: {fname}")
-            if len < 0:
+            if length < 0:
                 raise RuntimeError(f"Invalid item count in manifest for {fname}: {len}")
             all_batch_files.append(fname)
-            batch_sizes.append(len)
+            batch_sizes.append(length)
 
         # Compute offsets and totals
         batch_offsets = []
         total_items = 0
-        for len in batch_sizes:
+        for length in batch_sizes:
             batch_offsets.append(total_items)
-            total_items += len
+            total_items += length   
 
         # Light validation
         if not (len(batch_offsets) == len(batch_sizes) == len(all_batch_files)):
             raise ValueError("batch_offsets, batch_sizes, all_batch_files must have equal length")
         if sum(batch_sizes) != total_items:
             raise ValueError("Sum of batch_sizes must equal total_items")
-        if any(batch_offsets[i] >= batch_offsets[i+1] for i in range(len(batch_offsets)-1)):
-            raise ValueError("batch_offsets must be strictly increasing")
 
         return {
             "total_items": total_items,

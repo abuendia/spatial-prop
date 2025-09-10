@@ -1,6 +1,7 @@
-CUDA_VISIBLE_DEVICES=1 python /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/scripts/model_performance.py \
+CUDA_VISIBLE_DEVICES=0 python /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/scripts/model_performance.py \
     --dataset aging_coronal \
     --base_path /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw \
+    --exp_name "api_run" \
     --k_hop 2 \
     --augment_hop 2 \
     --center_celltypes "T cell,NSC,Pericyte" \
@@ -8,4 +9,6 @@ CUDA_VISIBLE_DEVICES=1 python /oak/stanford/groups/akundaje/abuen/spatial/spatia
     --inject_feature "none" \
     --learning_rate 0.0001 \
     --loss "weightedl1" \
-    --epochs 50
+    --epochs 50 \
+    --do_train_from_scratch \
+    --debug

@@ -6,15 +6,11 @@ import pandas as pd
 import scanpy as sc
 import anndata as ad
 import torch
-from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
-from torch_geometric.utils import k_hop_subgraph, one_hot
 from scipy.sparse import issparse
-from torch_geometric.utils.convert import from_scipy_sparse_matrix
 from typing import List, Dict, Union, Optional, Tuple, Any
 import os
 import tqdm 
-import matplotlib.pyplot as plt
 
 
 from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
@@ -330,27 +326,18 @@ if __name__ == "__main__":
     train_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
     test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"  # Using same data for demo
     
-    # Define perturbations
-    # perturbation_dict = {
-    #     'T cell': {'Igf2': 0.0},  
-    #     'NSC': {'Sox9': 2.0},         
-    #     'Pericyte': {'Ccl4': 0.5}    
-    # }
-    
-    # print("=== Training a new perturbation model ===")
-    # model, model_config, model_path = train_perturbation_model(
-    #     adata_path=train_data_path,
-    #     exp_name="api_run",
-    #     k_hop=2,
-    #     augment_hop=2,
-    #     center_celltypes="T cell,NSC,Pericyte",
-    #     node_feature="expression",
-    #     inject_feature="None",
-    #     num_cells_per_ct_id=100,
-    #     epochs=10,
-    #     debug=True,
-    #     debug_subset_size=10,
-    # )
+    print("=== Training a new perturbation model ===")
+    model, model_config, model_path = train_perturbation_model(
+        adata_path=train_data_path,
+        exp_name="api_run",
+        k_hop=2,
+        augment_hop=2,
+        center_celltypes="T cell,NSC,Pericyte",
+        node_feature="expression",
+        inject_feature="None",
+        num_cells_per_ct_id=100,
+        epochs=50,
+    )
     
     # Define perturbations
     perturbation_dict = {

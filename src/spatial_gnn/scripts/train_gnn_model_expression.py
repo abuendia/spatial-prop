@@ -32,7 +32,7 @@ def train_model_from_scratch(
     gene_list: Optional[List[str]] = None,
     normalize_total: bool = True,
     debug: bool = False,
-    debug_subset_size: int = 100,
+    debug_subset_size: int = 2,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     test_size: float = 0.2,
     random_state: int = 42,
@@ -77,8 +77,8 @@ def train_model_from_scratch(
         Whether to normalize total gene expression
     debug : bool, default=False
         Enable debug mode
-    debug_subset_size : int, default=100
-        Number of samples in debug mode
+    debug_subset_size : int, default=2
+        Number of batches in debug mode
     device : str, default="cuda" if available else "cpu"
         Device to train on
     test_size : float, default=0.2
@@ -130,6 +130,7 @@ def train_model_from_scratch(
         celltypes_to_index=celltypes_to_index,
         normalize_total=normalize_total,
         debug=debug,
+        overwrite=False,
         use_mp=False,
     )
 
@@ -149,6 +150,7 @@ def train_model_from_scratch(
         celltypes_to_index=celltypes_to_index,
         normalize_total=normalize_total,
         debug=debug,
+        overwrite=False,
         use_mp=False,
     )
     
@@ -158,29 +160,14 @@ def train_model_from_scratch(
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
-    # Apply debug mode subsetting if enabled
-    if debug:
-        print(f"DEBUG MODE: Using subset of {debug_subset_size} samples from each dataset", flush=True)
-        
-        # Subset train dataset
-        train_subset_size = min(debug_subset_size, len(train_dataset))
-        train_dataset._indices = list(range(train_subset_size))
-        
-        # Subset test dataset  
-        test_subset_size = min(debug_subset_size, len(test_dataset))
-        test_dataset._indices = list(range(test_subset_size))
-        
-        print(f"DEBUG: Train dataset subset to {len(train_dataset)} samples", flush=True)
-        print(f"DEBUG: Test dataset subset to {len(test_dataset)} samples", flush=True)
-
     # Load data
     all_train_data = []
     all_test_data = []
     
     # Get file names to load - use subset if in debug mode
     if debug:
-        train_files = train_dataset.processed_file_names[:train_subset_size]
-        test_files = test_dataset.processed_file_names[:test_subset_size]
+        train_files = train_dataset.processed_file_names[:debug_subset_size]
+        test_files = test_dataset.processed_file_names[:debug_subset_size]
     else:
         train_files = train_dataset.processed_file_names
         test_files = test_dataset.processed_file_names
@@ -251,8 +238,9 @@ def train_model_from_scratch(
     exp_dir_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
     if debug:
         exp_dir_name = f"DEBUG_{exp_dir_name}"
+    model_dir_name = loss+f"_{learning_rate:.0e}".replace("-","n")
     
-    save_dir = os.path.join("results/gnn", train_dataset.processed_dir.split("/")[-2], exp_dir_name)
+    save_dir = os.path.join("results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -350,7 +338,7 @@ def main():
     parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
     parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
-    parser.add_argument("--debug_subset_size", type=int, default=100, help="Number of samples to use in debug mode (default: 100)")
+    parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
