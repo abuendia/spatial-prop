@@ -330,7 +330,7 @@ def main():
     parser.add_argument("--base_path", help="Base path to the data directory (required if using --dataset)", type=str)
     parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
     parser.add_argument("--augment_hop", help="number of hops to take for graph augmentation", type=int, required=True)
-    parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
+    parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering or 'infer' to infer from the data", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
     parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)

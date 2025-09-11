@@ -40,9 +40,39 @@ def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Uni
             return None
         elif center_celltypes.lower() == 'all':
             return 'all'
+        elif center_celltypes.lower() == 'infer':
+            return 'infer'
         else:
             return [ct.strip() for ct in center_celltypes.split(',')]
     return center_celltypes
+
+
+def infer_center_celltypes_from_adata(adata):
+    """
+    Infer center cell types by finding the 3 cell types with the lowest cell counts.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object to analyze for cell type counts
+        
+    Returns
+    -------
+    list
+        List of cell type names with the lowest counts (up to 3, or all if less than 3)
+    """
+    celltype_counts = adata.obs['celltype'].value_counts()
+
+    if len(celltype_counts) <= 3:
+        inferred_celltypes = celltype_counts.index.tolist()
+        print(f"Inferred center cell types (all {len(inferred_celltypes)} available): {inferred_celltypes}")
+    else:
+        # Get the 3 with lowest counts
+        inferred_celltypes = celltype_counts.nsmallest(3).index.tolist()
+        print(f"Inferred center cell types (3 lowest counts): {inferred_celltypes}")
+        print(f"Cell type counts: {celltype_counts[inferred_celltypes].to_dict()}")
+
+    return inferred_celltypes
 
 
 def parse_gene_list(gene_list: Optional[str]) -> Optional[List[str]]:

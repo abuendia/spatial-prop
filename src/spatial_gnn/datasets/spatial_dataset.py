@@ -18,7 +18,7 @@ from torch_geometric.utils.convert import from_scipy_sparse_matrix
 import json
 
 from spatial_gnn.utils.graph_utils import build_spatial_graph
-from spatial_gnn.utils.dataset_utils import parse_center_celltypes
+from spatial_gnn.utils.dataset_utils import parse_center_celltypes, infer_center_celltypes_from_adata
 
 
 class SpatialAgingCellDataset(Dataset):
@@ -70,7 +70,7 @@ class SpatialAgingCellDataset(Dataset):
                  inject_feature=None,
                  sub_id="mouse_id",
                  use_ids=None,
-                 center_celltypes='all',
+                 center_celltypes='all', 
                  num_cells_per_ct_id=1,
                  k_hop=2,
                  augment_hop=0,
@@ -192,7 +192,7 @@ class SpatialAgingCellDataset(Dataset):
                 combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
         
         return combined_features
-    
+        
     @property
     def processed_dir(self) -> str:
         if self.augment_cutoff == 'auto':
@@ -270,7 +270,7 @@ class SpatialAgingCellDataset(Dataset):
             
             # filter to known cell type keys
             adata = adata[adata.obs.celltype.isin(self.celltypes_to_index.keys())]
-            
+                        
             # normalize by total genes
             if self.normalize_total is True:
                 print("  Normalizing data")
@@ -352,6 +352,7 @@ class SpatialAgingCellDataset(Dataset):
                 global_aug_batch_counter += 1
                 subgraph_count += len(batch)
 
+        manifest["center_celltypes"] = self.center_celltypes
         manifest_path = Path(self.processed_dir) / "manifest.json"
         tmp_path = manifest_path.with_suffix(".json.tmp")
         with open(tmp_path, "w") as f:
@@ -449,6 +450,8 @@ class SpatialAgingCellDataset(Dataset):
         
         if self.center_celltypes == "all":
             center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
+        elif self.center_celltypes == "infer":
+            center_celltypes_to_use = infer_center_celltypes_from_adata(sub_adata)
         else:
             center_celltypes_to_use = self.center_celltypes
             
