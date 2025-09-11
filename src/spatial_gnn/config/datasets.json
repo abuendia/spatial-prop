@@ -3,7 +3,8 @@
         "train_ids": ["1","101","14","19","30","38","42","46","53","61","7","70","75","80","86","97"],
         "test_ids": ["11","33","57","93"],
         "file_name": "aging_coronal.h5ad",
-        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"]
+        "celltypes": ["Neuron-Excitatory","Neuron-Inhibitory","Neuron-MSN","Astrocyte","Microglia","Oligodendrocyte","OPC","Endothelial","Pericyte","VSMC","VLMC","Ependymal","Neuroblast","NSC","Macrophage","Neutrophil","T cell","B cell"],
+        "center_celltypes": ["T cell","NSC","Pericyte"]
     },
     "aging_sagittal": {
         "train_ids": ["2","34","39","62","68"],

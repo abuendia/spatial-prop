@@ -209,15 +209,15 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
             out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
         
         if loss == "mse":
-            errors.append(F.mse_loss(out, batch.y).sqrt().item())
+            errors.append(F.mse_loss(out, batch.y.unsqueeze(1)).sqrt().item())
         elif loss == "l1":
-            errors.append(F.l1_loss(out, batch.y).item())
+            errors.append(F.l1_loss(out, batch.y.unsqueeze(1)).item())
         elif loss == "weightedl1":
-            errors.append(weighted_l1_loss(out, batch.y, criterion.zero_weight, criterion.nonzero_weight).item())
+            errors.append(weighted_l1_loss(out, batch.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
         elif loss == "balanced_mse":
-            errors.append(bmc_loss(out, batch.y, criterion.noise_sigma**2).item())
+            errors.append(bmc_loss(out, batch.y.unsqueeze(1), criterion.noise_sigma**2).item())
         elif loss == "npcc":
-            errors.append(npcc_loss(out, batch.y).item())
+            errors.append(npcc_loss(out, batch.y.unsqueeze(1)).item())
 
     return np.mean(errors)  # Derive ratio of correct predictions.
 

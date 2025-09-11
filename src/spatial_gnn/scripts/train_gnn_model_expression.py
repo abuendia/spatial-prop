@@ -115,6 +115,9 @@ def train_model_from_scratch(
 
     print(f"Training on device: {device}", flush=True)
 
+    if dataset is not None:
+        exp_name = dataset
+
     train_dataset = SpatialAgingCellDataset(
         subfolder_name="train",
         dataset_prefix=exp_name,
@@ -384,9 +387,9 @@ def main():
         eval_model(
             model=model,
             test_loader=test_loader,
-            inject_feature=args.inject_feature,
             save_dir=save_dir,
-            device=args.device
+            device=args.device,
+            inject=False
         )
 
 

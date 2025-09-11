@@ -114,6 +114,10 @@ def main():
                                         gene_list=gene_list,
                                         celltypes_to_index=celltypes_to_index)
     
+    all_test_data = []
+    for f in tqdm(test_dataset.processed_file_names):
+        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
+        all_test_data.extend(batch_list)
     test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(test_dataset), flush=True)
     
@@ -137,26 +141,20 @@ def main():
             num_layers=k_hop
         )
 
-    model.to(device)
     print(f"Model initialized on {device}")
 
     # create directory to save results
     model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
     save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
 
-    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth"), map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth")))
+    model.to(device)
     print(profile.count_parameters(model), flush=True)
 
-    eval_model(model, test_loader, inject_feature, save_dir, device)
+    eval_model(model, test_loader, save_dir, device, inject)
 
 
-def eval_model(model, test_loader, inject_feature, save_dir, device="cuda"):
-
-    if inject_feature is not None and inject_feature.lower() == "none":
-        inject_feature = None
-        inject = False
-    else:
-        inject = True
+def eval_model(model, test_loader, save_dir, device="cuda", inject=False):
 
     ### LOSS CURVES
     print("Plotting training and validation loss curves...", flush=True)
@@ -188,7 +186,7 @@ def eval_model(model, test_loader, inject_feature, save_dir, device="cuda"):
     actuals = []
     celltypes = []
     
-    for data in test_loader:
+    for data in tqdm(test_loader):
         data = data.to(device)
         if inject is False:
             out = model(data.x, data.edge_index, data.batch, None)
