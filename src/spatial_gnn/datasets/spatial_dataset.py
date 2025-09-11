@@ -178,7 +178,7 @@ class SpatialAgingCellDataset(Dataset):
         # For each gene, combine expression with embedding
         for i, gene_name in enumerate(gene_names):
             # Convert gene name to uppercase for lookup
-            gene_name_upper = gene_name.upper()
+            gene_name_upper = gene_name
             if gene_name_upper in self.genept_embeddings:
                 # Get the GenePT embedding for this gene
                 gene_embedding = self.genept_embeddings[gene_name_upper]
@@ -245,9 +245,7 @@ class SpatialAgingCellDataset(Dataset):
             print ("Dataset already exists at: ", self.processed_dir)
             return()
             
-        gene_names = self.gene_names
-        gene_names = np.array([gene.upper() for gene in gene_names])
-        
+        gene_names = self.gene_names        
         if self.subfolder_name is not None:
             genefn = self.processed_dir.split("/")[-2]
         else:
@@ -291,11 +289,7 @@ class SpatialAgingCellDataset(Dataset):
             
             # order by gene_names
             adata = adata[:, gene_names]
-            
-            # Convert all gene names to uppercase for consistency
-            adata.var_names = [gene.upper() for gene in adata.var_names]
-            gene_names = np.array([gene.upper() for gene in gene_names])
-            
+                        
             if self.use_ids is None:
                 sub_ids_arr = np.unique(adata.obs[self.sub_id])
             elif self.use_ids[rfi] is None:
