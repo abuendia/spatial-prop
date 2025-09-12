@@ -142,6 +142,9 @@ class SpatialAgingCellDataset(Dataset):
                 shutil.rmtree(self.processed_dir)
             else:
                 print(f"Creating new dataset at {self.processed_dir}")
+        
+        if self.center_celltypes == "infer":
+            self.center_celltypes = infer_center_celltypes_from_adata(self.raw_filepaths[0])
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
@@ -238,12 +241,12 @@ class SpatialAgingCellDataset(Dataset):
             "version": 1.0,
         }
         
-        # Create / overwrite directory
-        if not os.path.exists(self.processed_dir):
-            os.makedirs(self.processed_dir)
-        else:
+        if os.path.exists(self.processed_dir):
             print ("Dataset already exists at: ", self.processed_dir)
             return()
+        else:
+            print(f"Creating new dataset at: {self.processed_dir}")
+            os.makedirs(self.processed_dir)
             
         gene_names = self.gene_names        
         if self.subfolder_name is not None:
@@ -450,8 +453,6 @@ class SpatialAgingCellDataset(Dataset):
         
         if self.center_celltypes == "all":
             center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
-        elif self.center_celltypes == "infer":
-            center_celltypes_to_use = infer_center_celltypes_from_adata(sub_adata)
         else:
             center_celltypes_to_use = self.center_celltypes
             

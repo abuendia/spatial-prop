@@ -2,6 +2,7 @@ import os
 import json
 from typing import Union, List, Optional, Tuple
 import numpy as np
+import scanpy as sc
 
 import torch
 from sklearn.model_selection import train_test_split
@@ -47,13 +48,14 @@ def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Uni
     return center_celltypes
 
 
-def infer_center_celltypes_from_adata(adata):
+def infer_center_celltypes_from_adata(adata_path):
     """
     Infer center cell types by finding the 3 cell types with the lowest cell counts.
 
     Parameters
     ----------
-    adata : anndata.AnnData
+    adata_path : str
+        Path to AnnData object to analyze for cell type counts
         AnnData object to analyze for cell type counts
         
     Returns
@@ -61,6 +63,7 @@ def infer_center_celltypes_from_adata(adata):
     list
         List of cell type names with the lowest counts (up to 3, or all if less than 3)
     """
+    adata = sc.read_h5ad(adata_path)
     celltype_counts = adata.obs['celltype'].value_counts()
 
     if len(celltype_counts) <= 3:

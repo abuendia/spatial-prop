@@ -21,6 +21,7 @@ from scipy.stats import pearsonr, spearmanr
 from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch, center_celltype_mean_baseline_batch, global_mean_baseline_batch
 
 
 def main():
@@ -34,10 +35,6 @@ def main():
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
-    parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
-    parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
-    parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
-    parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     args = parser.parse_args()
 
     # Load dataset configurations
@@ -63,9 +60,6 @@ def main():
     center_celltypes = parse_center_celltypes(args.center_celltypes)
     node_feature = args.node_feature
     inject_feature = args.inject_feature
-    learning_rate = args.learning_rate
-    loss = args.loss
-    epochs = args.epochs
 
     if inject_feature.lower() == "none":
         inject_feature = None
@@ -77,8 +71,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device, flush=True)
 
-    # Load gene list if provided
-    gene_list = parse_gene_list(args.gene_list)
 
     # Build cell type index
     celltypes_to_index = {}
@@ -97,7 +89,6 @@ def main():
                                             center_celltypes=center_celltypes,
                                             use_ids=train_ids,
                                             raw_filepaths=[file_path],
-                                            gene_list=gene_list,
                                             celltypes_to_index=celltypes_to_index)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
@@ -111,106 +102,81 @@ def main():
                                         center_celltypes=center_celltypes,
                                         use_ids=test_ids,
                                         raw_filepaths=[file_path],
-                                        gene_list=gene_list,
                                         celltypes_to_index=celltypes_to_index)
 
-    test_dataset.process()
+    test_dataset.process()  
     print("Finished processing test dataset", flush=True)
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
     
-    all_test_data = []
+    all_test_data, all_train_data = [], []
+    
+    # for f in tqdm(train_dataset.processed_file_names):
+    #     batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
+    #     all_train_data.extend(batch_list)
     for f in tqdm(test_dataset.processed_file_names):
         batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
         all_test_data.extend(batch_list)
+    
+    # train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    print(len(test_dataset), flush=True)
+    print(len(all_train_data), len(all_test_data), flush=True)
     
-    if inject is True:
-        model = GNN(
-            hidden_channels=64,
-            input_dim=int(train_dataset.get(0).x.shape[1]),
-            output_dim=len(train_dataset.get(0).y),
-            inject_dim=int(train_dataset.get(0).inject.shape[1]),
-            method="GIN", 
-            pool="add", 
-            num_layers=k_hop
-        )
-    else:
-        model = GNN(
-            hidden_channels=64,
-            input_dim=int(train_dataset.get(0).x.shape[1]),
-            output_dim=len(train_dataset.get(0).y),
-            method="GIN", 
-            pool="add", 
-            num_layers=k_hop
-        )
-
-    print(f"Model initialized on {device}")
-
-    # create directory to save results
-    model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
-    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
-
-    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth")))
-    model.to(device)
-    print(profile.count_parameters(model), flush=True)
-
-    eval_model(model, test_loader, save_dir, device, inject)
-
-
-def eval_model(model, test_loader, save_dir, device="cuda", inject=False):
-
-    ### LOSS CURVES
-    print("Plotting training and validation loss curves...", flush=True)
+    save_dir = os.path.join("results/baselines",train_dataset.processed_dir.split("/")[-2])
+    os.makedirs(save_dir, exist_ok=True)
     
-    with open(os.path.join(save_dir, "training.pkl"), 'rb') as handle:
-        b = pickle.load(handle)
-    
-    best_idx = np.argmin(b['test'])
-    
-    plt.figure(figsize=(4,4))
-    plt.plot(b['epoch'],b['train'],label='Train',color='0.2',zorder=0)
-    plt.plot(b['epoch'],b['test'],label='Test',color='green',zorder=1)
-    plt.scatter(b['epoch'][best_idx],b['test'][best_idx],s=50,c='green',marker="D",zorder=2,label="Selected Model")
-    plt.ylabel("Weighted L1 Loss", fontsize=16)
-    plt.xlabel("Training Epochs", fontsize=16)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "loss_curves.pdf"), bbox_inches='tight')
-    plt.close()
-    
-    print("Finished plots.", flush=True)
+    print("Running k-hop baseline...", flush=True)
+    eval_model(None, test_loader, save_dir, "khop_mean")
+    breakpoint()
+    print("Running center cell type baseline...", flush=True)
+    eval_model(None, test_loader, save_dir, "khop_celltype_mean")
+    print("Running global baseline...", flush=True)
+    eval_model(None, test_loader, save_dir, "global_mean")
 
-    ### MODEL PERFORMANCE
-    print("Measuring model predictive performance bulk and by cell type...", flush=True)
 
-    model.eval()
+def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"):
+
+    save_dir = os.path.join(save_dir, baseline_type)
+    os.makedirs(save_dir, exist_ok=True)
+
+    print("Measuring baseline performance bulk and by cell type...", flush=True)
+
     preds = []
     actuals = []
     celltypes = []
     
-    for data in tqdm(test_loader):
-        data = data.to(device)
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None) # [512, 300]
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject)
-        preds.append(out)
+    if baseline_type == "global_mean":
+        global_mean = global_mean_baseline_batch(train_loader)
+        for data in tqdm(test_loader):
+            preds.append(global_mean)
+            actuals.append(train_loader.dataset.y.float())
+        preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds])
+        celltypes = np.concatenate((celltypes,np.concatenate(train_loader.dataset.center_celltype))) # [512]
+    else:
+        for data in tqdm(test_loader):
+            data = data.to(device)
+
+            if baseline_type == "khop_mean":
+                out = khop_mean_baseline_batch(data) # [512, 300]
+            elif baseline_type == "khop_celltype_mean":
+                out = center_celltype_mean_baseline_batch(data) # [512, 300]   
+            else:
+                raise ValueError(f"Baseline type {baseline_type} not recognized!")
+                
+            preds.append(out)
+            
+            if data.y.shape != out.shape:
+                actuals.append(torch.reshape(data.y.float(), out.shape))
+            else:
+                actuals.append(data.y.float()) # [[512, 300]]
+            
+            # get cell type
+            celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
         
-        if data.y.shape != out.shape:
-            actuals.append(torch.reshape(data.y.float(), out.shape))
-        else:
-            actuals.append(data.y.float()) # [[512, 300]]
-
-        # get cell type
-        celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
+    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds])
+    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals])
+    celltypes = np.array(celltypes)
     
-    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds]) # [num_cells, num_genes]
-    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals]) # [num_cells, num_genes]
-    celltypes = np.array(celltypes) # [num_cells,]
-
     # drop genes that are missing everywhere
     preds = preds[:, actuals.max(axis=0)>=0]
     actuals = actuals[:, actuals.max(axis=0)>=0]
