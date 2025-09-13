@@ -111,14 +111,15 @@ def main():
     
     all_test_data, all_train_data = [], []
     
-    # for f in tqdm(train_dataset.processed_file_names):
-    #     batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
-    #     all_train_data.extend(batch_list)
-    for f in tqdm(test_dataset.processed_file_names):
+    for idx, f in tqdm(enumerate(train_dataset.processed_file_names)):
+        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
+        all_train_data.extend(batch_list)
+    
+    for idx, f in tqdm(enumerate(test_dataset.processed_file_names)):
         batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
         all_test_data.extend(batch_list)
-    
-    # train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+
+    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(all_train_data), len(all_test_data), flush=True)
     
@@ -127,11 +128,10 @@ def main():
     
     print("Running k-hop baseline...", flush=True)
     eval_model(None, test_loader, save_dir, "khop_mean")
-    breakpoint()
     print("Running center cell type baseline...", flush=True)
     eval_model(None, test_loader, save_dir, "khop_celltype_mean")
     print("Running global baseline...", flush=True)
-    eval_model(None, test_loader, save_dir, "global_mean")
+    eval_model(train_loader, test_loader, save_dir, "global_mean")
 
 
 def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"):
@@ -140,6 +140,7 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
     os.makedirs(save_dir, exist_ok=True)
 
     print("Measuring baseline performance bulk and by cell type...", flush=True)
+    print("Baseline type:", baseline_type, flush=True)
 
     preds = []
     actuals = []
@@ -149,10 +150,10 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
         global_mean = global_mean_baseline_batch(train_loader)
         for data in tqdm(test_loader):
             preds.append(global_mean)
-            actuals.append(train_loader.dataset.y.float())
-        preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds])
-        celltypes = np.concatenate((celltypes,np.concatenate(train_loader.dataset.center_celltype))) # [512]
-    else:
+            actuals.append(data.y.float())
+            celltypes.append(data.center_celltype)
+        
+    else: # local baselines
         for data in tqdm(test_loader):
             data = data.to(device)
 
