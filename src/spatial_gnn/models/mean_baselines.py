@@ -75,7 +75,7 @@ def center_celltype_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
     x = batch_data.x  # (total_nodes, num_genes)
     center_nodes = batch_data.center_node  # (batch_size,)
     batch_ids = batch_data.batch  # (total_nodes,)
-    celltypes = torch.tensor([celltype for subgraph in batch_data.celltypes for celltype in subgraph], device=x.device) # (total_nodes,)
+    celltypes = np.array([celltype for subgraph in batch_data.celltypes for celltype in subgraph]) # (total_nodes,)
     center_celltypes = batch_data.center_celltype  # (batch_size,)
     num_genes = x.shape[1]
     batch_size = len(center_nodes)
@@ -90,7 +90,7 @@ def center_celltype_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
         
         # Find cells of the same type as the center cell, excluding the center cell itself
         exclude_center_node_mask = torch.arange(len(batch_ids), device=x.device) != center_node
-        same_celltype_type_mask = (celltypes == center_celltype) & graph_mask & exclude_center_node_mask
+        same_celltype_type_mask = torch.tensor((celltypes == center_celltype), device=x.device) & graph_mask & exclude_center_node_mask
         same_type_indices = torch.where(same_celltype_type_mask)[0]
         
         if len(same_type_indices) > 0:
@@ -105,35 +105,36 @@ def center_celltype_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
                 predictions[i] = torch.mean(x[neighbor_indices], dim=0)
             else:
                 predictions[i] = torch.zeros(num_genes, device=x.device)
-    
+        
     return predictions
 
 
-def global_mean_baseline_batch(train_dataset) -> torch.Tensor:
+def global_mean_baseline_batch(train_dataset, device="cuda") -> torch.Tensor:
     """
     Global mean expression over ALL non-center cells across all batches/graphs.
     Works whether each item is a single-graph Data or a multi-graph Batch.
     """
-    sum_x = None      # will hold sum over genes
-    total = 0         # scalar count of non-center cells
+    sum_x = None
+    total = 0
 
-    with torch.no_grad():
-        for batch in train_dataset:
-            x = batch.x                              # [N, G]
-            centers = batch.center_node              # [B] or scalar per-graph; on batched it's [B]
+    for batch in train_dataset:
+        batch = batch.to(device)
 
-            # lazily init accumulator on the right device/dtype
-            if sum_x is None:
-                sum_x = torch.zeros(x.size(1), dtype=x.dtype, device=x.device)
+        x = batch.x # (num_nodes, num_genes)
+        centers = batch.center_node # (batch_size,)
 
-            sum_x += x.sum(dim=0)                    # add all cells
-            if centers is not None:
-                centers = centers.to(x.device).long()
-                # subtract centers' contribution (safe even if centers already zeroed)
-                sum_x -= x[centers].sum(dim=0)
-                total += x.size(0) - int(centers.numel())
-            else:
-                total += x.size(0)
+        # lazily init accumulator on the right device/dtype
+        if sum_x is None:
+            sum_x = torch.zeros(x.size(1), dtype=x.dtype, device=x.device) # (num_genes,)
+
+        sum_x += x.sum(dim=0)                    # add all cells
+        if centers is not None:
+            centers = centers.to(x.device).long()
+            # subtract centers' contribution
+            sum_x -= x[centers].sum(dim=0)
+            total += x.size(0) - int(centers.numel())
+        else:
+            total += x.size(0)
 
     if sum_x is None or total == 0:
         # fallback

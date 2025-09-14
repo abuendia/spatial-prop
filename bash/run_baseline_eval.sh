@@ -5,7 +5,7 @@ set -uo pipefail
 GPUS=(0 1)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/run_baselines.py
-DATASETS=("lohoff" "liverperturb" "pilot" "zeng" "androvic" "kukanja" "allen" "reprogramming" "exercise" "aging_coronal" "aging_sagittal")
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "allen" "kukanja" "androvic" "zeng" "pilot" "liverperturb" "lohoff")
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 # ----------------
@@ -25,19 +25,19 @@ for dataset in "${DATASETS[@]}"; do
 
   {
     ts=$(date +%Y%m%d_%H%M%S)
-    log="$LOGDIR/baselines_eval_${dataset}_${ts}.log"
+    log="$LOGDIR/baselines_updated_${dataset}_${ts}.log"
     echo "[$(date +%T)] start $dataset on GPU $gpu -> $log"
 
     # Run and capture both stdout and stderr to the log file
     CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
-        --dataset "$dataset" \
-        --base_path /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw \
-        --exp_name "$dataset" \
-        --k_hop 2 \
-        --augment_hop 2 \
-        --center_celltypes "all" \
-        --node_feature "expression" \
-        --inject_feature "none" 
+      --dataset "$dataset" \
+      --base_path /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw \
+      --exp_name "$dataset" \
+      --k_hop 2 \
+      --augment_hop 2 \
+      --center_celltypes "all" \
+      --node_feature "expression" \
+      --inject_feature "none" \
       >"$log" 2>&1
 
     status=$?

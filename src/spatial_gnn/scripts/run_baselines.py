@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
+    parser.add_argument("--debug", help="Enable debug mode with subset of data for quick testing", action="store_true")
     args = parser.parse_args()
 
     # Load dataset configurations
@@ -111,19 +112,24 @@ def main():
     
     all_test_data, all_train_data = [], []
     
-    for idx, f in tqdm(enumerate(train_dataset.processed_file_names)):
+    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
         batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
         all_train_data.extend(batch_list)
     
-    for idx, f in tqdm(enumerate(test_dataset.processed_file_names)):
+    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
         batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
         all_test_data.extend(batch_list)
 
+    print("value of index: ", idx, flush=True)
     train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(all_train_data), len(all_test_data), flush=True)
     
-    save_dir = os.path.join("results/baselines",train_dataset.processed_dir.split("/")[-2])
+    save_dir = os.path.join("results/baselines_updated",train_dataset.processed_dir.split("/")[-2])
     os.makedirs(save_dir, exist_ok=True)
     
     print("Running k-hop baseline...", flush=True)
@@ -147,11 +153,20 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
     celltypes = []
     
     if baseline_type == "global_mean":
-        global_mean = global_mean_baseline_batch(train_loader)
+        global_mean = global_mean_baseline_batch(train_loader)  # (num_genes,)
+
         for data in tqdm(test_loader):
-            preds.append(global_mean)
-            actuals.append(data.y.float())
-            celltypes.append(data.center_celltype)
+            batch_size = len(data.center_node)
+            out = global_mean.unsqueeze(0).repeat(batch_size, 1)  # [batch_size, num_genes]
+
+            preds.append(out)
+
+            if data.y.shape != out.shape:
+                actuals.append(torch.reshape(data.y.float(), out.shape))
+            else:
+                actuals.append(data.y.float())
+
+            celltypes = np.concatenate((celltypes, np.concatenate(data.center_celltype)))
         
     else: # local baselines
         for data in tqdm(test_loader):

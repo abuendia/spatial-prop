@@ -1,11 +1,11 @@
 #!/bin/bash
-set -euo pipefail
+set -uo pipefail
 
 # ---- config ----
-GPUS=(0)   # 2 GPUs
+GPUS=(0 1)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
-DATASETS=("aging_coronal")
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "allen" "kukanja" "androvic" "zeng" "pilot" "liverperturb" "lohoff")
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 # ----------------
