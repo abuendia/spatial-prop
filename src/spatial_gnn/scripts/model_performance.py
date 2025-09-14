@@ -196,7 +196,6 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     for data in tqdm(test_loader):
         data = data.to(device)
         if inject is False:
-            breakpoint()
             out = model(data.x, data.edge_index, data.batch, None, gene_names) 
         else:
             out = model(data.x, data.edge_index, data.batch, data.inject, gene_names)
