@@ -37,7 +37,8 @@ def train_model_from_scratch(
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     test_size: float = 0.2,
     random_state: int = 42,
-    stratify_by: Optional[str] = None
+    stratify_by: Optional[str] = None,
+    genept_embeddings: Optional[str] = None
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -88,7 +89,8 @@ def train_model_from_scratch(
         Random seed for reproducibility (only used in AnnData mode)
     stratify_by : Optional[str], default=None
         Column name in adata.obs to stratify the split by (only used in AnnData mode)
-        
+    genept_embeddings : Optional[str], default=None
+        Path to file containing GenePT embeddings
     Returns
     -------
     Tuple[GNN, str]
@@ -164,25 +166,23 @@ def train_model_from_scratch(
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
 
+    if genept_embeddings is not None:
+        with open(genept_embeddings, "rb") as f:
+            genept_embeddings = pickle.load(f)
+
     # Load data
     all_train_data = []
     all_test_data = []
     
-    # Get file names to load - use subset if in debug mode
-    if debug:
-        train_files = train_dataset.processed_file_names[:debug_subset_size]
-        test_files = test_dataset.processed_file_names[:debug_subset_size]
-    else:
-        train_files = train_dataset.processed_file_names
-        test_files = test_dataset.processed_file_names
-    
-    all_train_data = []
-    for f in tqdm.tqdm(train_files):
+    for idx, f in tqdm.tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
+        if debug and idx > debug_subset_size:
+            break
         batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)  # list[Data]
         all_train_data.extend(batch_list)
-
-    all_test_data = []
-    for f in tqdm.tqdm(test_files):
+    
+    for idx, f in tqdm.tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
+        if debug and idx > debug_subset_size:
+            break
         batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
         all_test_data.extend(batch_list)
     
@@ -201,7 +201,8 @@ def train_model_from_scratch(
             inject_dim=int(train_dataset.get(0).inject.shape[1]),
             method="GIN", 
             pool="add", 
-            num_layers=k_hop
+            num_layers=k_hop,
+            genept_embeddings=genept_embeddings
         )
     else:
         model = GNN(
@@ -210,7 +211,8 @@ def train_model_from_scratch(
             output_dim=len(train_dataset.get(0).y),
             method="GIN", 
             pool="add", 
-            num_layers=k_hop
+            num_layers=k_hop,
+            genept_embeddings=genept_embeddings
         )
     model.to(device)
     print(f"Model initialized on {device}")
@@ -244,17 +246,22 @@ def train_model_from_scratch(
         exp_dir_name = f"DEBUG_{exp_dir_name}"
     model_dir_name = loss+f"_{learning_rate:.0e}".replace("-","n")
     
-    save_dir = os.path.join("results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
+    if genept_embeddings is not None:
+        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT")
+    else:
+        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
+    gene_names = [gene.upper() for gene in train_dataset.gene_names]
+
     for epoch in range(1, epochs + 1):
         # Training
-        train(model, train_loader, criterion, optimizer, inject=inject, device=device)
+        train(model, train_loader, criterion, optimizer, gene_names=gene_names, inject=inject, device=device)
         
         # Evaluation
-        train_score = test(model, train_loader, loss, criterion, inject=inject, device=device)
-        test_score = test(model, test_loader, loss, criterion, inject=inject, device=device)
+        train_score = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+        test_score = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
         
         # Save best model
         if test_score < best_score:
@@ -300,7 +307,8 @@ def train_model_from_scratch(
         "test_ids": test_ids,
         "data_file_path": file_path,
         "celltypes_to_index": celltypes_to_index,
-        "num_cells_per_ct_id": num_cells_per_ct_id
+        "num_cells_per_ct_id": num_cells_per_ct_id,
+        "genept_embeddings": True if genept_embeddings is not None else False
     }
     
     config_path = os.path.join(save_dir, "model_config.json")
@@ -315,7 +323,7 @@ def train_model_from_scratch(
         pickle.dump(training_results, f)
     print("Training logs saved")
 
-    return model, model_config, final_model_path, test_loader, save_dir
+    return model, model_config, final_model_path, test_loader, save_dir, gene_names
 
 
 def main():
@@ -344,6 +352,7 @@ def main():
     parser.add_argument("--do_eval", action='store_true', help="Enable evaluation mode")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
+    parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
     
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
@@ -359,7 +368,7 @@ def main():
     if args.anndata and args.base_path:
         parser.error("--base_path should not be specified when using --anndata")
 
-    model, _, _, test_loader, save_dir = train_model_from_scratch(
+    model, _, _, test_loader, save_dir, gene_names = train_model_from_scratch(
         k_hop=args.k_hop,
         augment_hop=args.augment_hop,
         center_celltypes=args.center_celltypes,
@@ -380,7 +389,8 @@ def main():
         device=args.device,
         test_size=args.test_size,
         random_state=args.random_state,
-        stratify_by=args.stratify_by
+        stratify_by=args.stratify_by,
+        genept_embeddings=args.genept_embeddings
     )
 
     if args.do_eval:
@@ -389,7 +399,8 @@ def main():
             test_loader=test_loader,
             save_dir=save_dir,
             device=args.device,
-            inject=False
+            inject=False,
+            gene_names=gene_names
         )
 
 

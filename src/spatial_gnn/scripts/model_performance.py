@@ -148,6 +148,8 @@ def main():
 
     print(f"Model initialized on {device}")
 
+    gene_names = [gene.upper() for gene in train_dataset.gene_names]
+
     # create directory to save results
     model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
     save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
@@ -156,10 +158,10 @@ def main():
     model.to(device)
     print(profile.count_parameters(model), flush=True)
 
-    eval_model(model, test_loader, save_dir, device, inject)
+    eval_model(model, test_loader, save_dir, device, inject, gene_names)
 
 
-def eval_model(model, test_loader, save_dir, device="cuda", inject=False):
+def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_names=None):
 
     ### LOSS CURVES
     print("Plotting training and validation loss curves...", flush=True)
@@ -194,9 +196,10 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False):
     for data in tqdm(test_loader):
         data = data.to(device)
         if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None) # [512, 300]
+            breakpoint()
+            out = model(data.x, data.edge_index, data.batch, None, gene_names) 
         else:
-            out = model(data.x, data.edge_index, data.batch, data.inject)
+            out = model(data.x, data.edge_index, data.batch, data.inject, gene_names)
         preds.append(out)
         
         if data.y.shape != out.shape:

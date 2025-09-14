@@ -13,12 +13,19 @@ from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 
 class GNN(torch.nn.Module):
     def __init__(self, hidden_channels, input_dim, output_dim=1, inject_dim=0,
-                 num_layers=3, method="GCN", pool="add"):
+                 num_layers=3, method="GCN", pool="add", genept_embeddings=None):
         super(GNN, self).__init__()
         torch.manual_seed(444)
         
         self.method = method
         self.pool = pool
+        self.genept_embeddings = genept_embeddings
+        self.genept_embedding_dim = 0
+        
+        # Set embedding dimension if GenePT embeddings are provided
+        if self.genept_embeddings is not None:
+            self.genept_embedding_dim = len(next(iter(self.genept_embeddings.values())))
+            print(f"Using {len(self.genept_embeddings)} GenePT embeddings with dimension {self.genept_embedding_dim}")
         
         if self.method == "GCN":
             self.conv1 = GCNConv(input_dim, hidden_channels)
@@ -49,9 +56,66 @@ class GNN(torch.nn.Module):
         else:
             raise Exception("'method' not recognized.")
         
+        # Adjust inject_dim if GenePT embeddings are used
+        if self.genept_embeddings is not None:
+            # Single weighted embedding vector from neighbor context
+            inject_dim += self.genept_embedding_dim
+            
         self.lin = Linear(hidden_channels+inject_dim, output_dim)
 
-    def forward(self, x, edge_index, batch, inject=None):    
+    def _prepare_genept_lookup(self, gene_names, device="cuda"):
+        # Map genes -> row in embedding matrix
+        valid_rows, valid_idx = [], []
+        for j, gene_name in enumerate(gene_names):
+            emb = self.genept_embeddings.get(gene_name)
+            if emb is not None:
+                valid_rows.append(torch.as_tensor(emb, dtype=torch.float32))
+                valid_idx.append(j)
+
+        if len(valid_rows) == 0:
+            # No overlaps; store empty tensors
+            self.register_buffer("_E_valid", torch.zeros(0, self.genept_embedding_dim))
+            self.register_buffer("_valid_idx", torch.zeros(0, dtype=torch.long))
+        else:
+            E_valid = torch.stack(valid_rows, dim=0)             # [G_valid, D]
+            valid_idx = torch.tensor(valid_idx, dtype=torch.long) # [G_valid]
+            self.register_buffer("_E_valid", E_valid.to(device))
+            self.register_buffer("_valid_idx", valid_idx.to(device))
+
+        self._genept_cache_ready = True
+
+    def _create_genept_injection_features(self, x, batch, gene_names, device="cuda", k: int = 10):
+        # Lazy-prepare cache if needed or if gene_names changed in size
+        if not getattr(self, "_genept_cache_ready", False) or \
+        getattr(self, "_cached_gene_count", None) != len(gene_names):
+            self._prepare_genept_lookup(gene_names, device)
+            self._cached_gene_count = len(gene_names)
+
+        genept_embeddings = self._E_valid  # [G_valid, D]
+        valid_idx = self._valid_idx  # [G_valid]
+        num_graphs = int(batch.max().item()) + 1
+
+        if genept_embeddings.numel() == 0:
+            # No overlap between gene_names and genept embeddings
+            return x.new_zeros((num_graphs, self.genept_embedding_dim))
+
+        mean_expr = global_mean_pool(x, batch)  # uses all nodes per graph
+        mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
+        k_eff = min(k, mean_expr_valid.size(1))
+        vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
+        topk_E = genept_embeddings.index_select(0, idx_in_valid.reshape(-1)).reshape(num_graphs, k_eff, -1)
+
+        weights = vals.unsqueeze(-1)                  # [B, k_eff, 1]
+        num = (weights * topk_E).sum(dim=1)           # [B, D]
+        denom = weights.abs().sum(dim=1).clamp_min(1e-12)  # [B, 1]
+        out = num / denom
+
+        return out
+
+    def forward(self, x, edge_index, batch, inject=None, gene_names=None):    
+        # Store original x for GenePT feature extraction
+        original_x = x
+        
         # node embeddings 
         x = F.relu(self.conv1(x, edge_index))
         for layer_idx, conv in enumerate(self.convs):
@@ -73,10 +137,26 @@ class GNN(torch.nn.Module):
         # final prediction
         x = F.dropout(x, p=0.1, training=self.training)
         
-        if inject is None: # use only embedding to predict
+        # Prepare injection features
+        injection_features = []
+        
+        # Add existing inject features if provided
+        if inject is not None:
+            injection_features.append(inject)
+        
+        # Add GenePT embedding features if available
+        if (self.genept_embeddings is not None and gene_names is not None):
+            genept_features = self._create_genept_injection_features(
+                original_x, batch, gene_names, x.device, k=10
+            )
+            injection_features.append(genept_features)
+        
+        # Concatenate all injection features
+        if injection_features:
+            all_inject_features = torch.cat(injection_features, dim=1)
+            x = self.lin(torch.cat((x, all_inject_features), dim=1))
+        else:
             x = self.lin(x)
-        else: # inject features at last layer
-            x = self.lin(torch.cat((x,inject),1))
         
         return x
     
@@ -179,15 +259,22 @@ class WeightedL1Loss(_Loss):
 
 
 
-def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
+def train(model, loader, criterion, optimizer, gene_names=None, inject=False, device="cuda"):
     model.train()
 
     for batch in loader:  
         batch.to(device)
-        if inject is False:
-            out = model(batch.x, batch.edge_index, batch.batch, None)  # Perform a single forward pass.
-        else:
-            out = model(batch.x, batch.edge_index, batch.batch, batch.inject) # Perform a single forward pass.
+        
+        # Prepare arguments for forward pass
+        forward_args = {
+            'x': batch.x,
+            'edge_index': batch.edge_index, 
+            'batch': batch.batch,
+            'inject': batch.inject if inject else None,
+            'gene_names': gene_names,
+        }
+        
+        out = model(**forward_args)  # Perform a single forward pass.
         
         loss = criterion(out, batch.y)  # Compute the loss.
                 
@@ -197,16 +284,23 @@ def train(model, loader, criterion, optimizer, inject=False, device="cuda"):
 
     
 
-def test(model, loader, loss, criterion, inject=False, device="cuda"):
+def test(model, loader, loss, criterion, gene_names=None, inject=False, device="cuda"):
     model.eval()
 
     errors = []
     for batch in loader: 
         batch.to(device)
-        if inject is False:
-            out = model(batch.x, batch.edge_index, batch.batch, None)
-        else:
-            out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
+        
+        # Prepare arguments for forward pass
+        forward_args = {
+            'x': batch.x,
+            'edge_index': batch.edge_index, 
+            'batch': batch.batch,
+            'inject': batch.inject if inject else None,
+            'gene_names': gene_names,
+        }
+        
+        out = model(**forward_args)
         
         if loss == "mse":
             errors.append(F.mse_loss(out, batch.y.unsqueeze(1)).sqrt().item())
@@ -221,7 +315,7 @@ def test(model, loader, loss, criterion, inject=False, device="cuda"):
 
     return np.mean(errors)  # Derive ratio of correct predictions.
 
-def predict(model, dataloader, adata, device="cuda"):
+def predict(model, dataloader, adata, gene_names=None, device="cuda"):
     """
     Run GNN model predictions and convert back to AnnData format using the stored mapping info.
     
@@ -259,10 +353,16 @@ def predict(model, dataloader, adata, device="cuda"):
             
             batch.to(device)
             
-            if hasattr(batch, 'inject') and batch.inject is not None:
-                out = model(batch.x, batch.edge_index, batch.batch, batch.inject)
-            else:
-                out = model(batch.x, batch.edge_index, batch.batch, None)
+            # Prepare arguments for forward pass
+            forward_args = {
+                'x': batch.x,
+                'edge_index': batch.edge_index, 
+                'batch': batch.batch,
+                'inject': batch.inject if hasattr(batch, 'inject') and batch.inject is not None else None,
+                'gene_names': gene_names,
+            }
+            
+            out = model(**forward_args)
             
             batch_predictions = out.cpu().numpy()
             

@@ -79,7 +79,6 @@ class SpatialAgingCellDataset(Dataset):
                  radius_cutoff=200,
                  celltypes_to_index=None,
                  embedding_json=None,
-                 genept_embeddings_path=None,
                  perturbation_mask_key="perturbed_input",
                  batch_size=500,
                  overwrite=False,
@@ -124,18 +123,6 @@ class SpatialAgingCellDataset(Dataset):
             for k in self.cell_embeddings:
                 self.cell_embeddings[k] = np.array(self.cell_embeddings[k], dtype=np.float32)
         
-        # Load GenePT embeddings if provided
-        self.genept_embeddings_path = genept_embeddings_path
-        self.genept_embeddings = None
-        if genept_embeddings_path is not None:
-            print(f"Loading GenePT embeddings from {genept_embeddings_path}")
-            with open(genept_embeddings_path, 'rb') as f:
-                self.genept_embeddings = pickle.load(f)
-            # Convert all embeddings to np.array for efficient stacking
-            for k in self.genept_embeddings:
-                self.genept_embeddings[k] = np.array(self.genept_embeddings[k], dtype=np.float32)
-            print(f"Loaded {len(self.genept_embeddings)} GenePT embeddings")
-
         if self.overwrite:
             if os.path.exists(self.processed_dir):
                 print(f"Overwriting existing dataset at {self.processed_dir}")
@@ -149,53 +136,6 @@ class SpatialAgingCellDataset(Dataset):
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
     
-    def _combine_expression_with_genept(self, expression_matrix, gene_names):
-        """
-        Combine raw expression values with GenePT embeddings.
-        
-        For each gene, multiply the raw expression value by the corresponding GenePT embedding.
-        This creates a feature vector that combines expression magnitude with semantic gene information.
-        
-        Parameters:
-        -----------
-        expression_matrix : np.ndarray
-            Expression matrix (cells x genes)
-        gene_names : np.ndarray
-            Gene names corresponding to the expression matrix
-            
-        Returns:
-        --------
-        np.ndarray
-            Combined features matrix (cells x (genes * embedding_dim))
-        """
-        if self.genept_embeddings is None:
-            return expression_matrix
-        
-        # Get embedding dimension
-        emb_dim = len(next(iter(self.genept_embeddings.values())))
-        
-        # Initialize output matrix
-        n_cells, n_genes = expression_matrix.shape
-        combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
-        
-        # For each gene, combine expression with embedding
-        for i, gene_name in enumerate(gene_names):
-            # Convert gene name to uppercase for lookup
-            gene_name_upper = gene_name
-            if gene_name_upper in self.genept_embeddings:
-                # Get the GenePT embedding for this gene
-                gene_embedding = self.genept_embeddings[gene_name_upper]
-                
-                # Multiply expression values by the embedding
-                # This creates a feature vector where each element is expression * embedding_dim
-                for j in range(emb_dim):
-                    combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
-            else:
-                # If gene not in embeddings, use zeros for that gene's embedding dimensions
-                combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
-        
-        return combined_features
-        
     @property
     def processed_dir(self) -> str:
         if self.augment_cutoff == 'auto':
@@ -203,11 +143,8 @@ class SpatialAgingCellDataset(Dataset):
         else:
             aug_key = int(self.augment_cutoff*100)
         celltype_firstletters = "".join([x[0] for x in self.center_celltypes])
-        
-        # Add GenePT indicator to directory name if embeddings are used
-        genept_suffix = "_GenePT" if self.genept_embeddings is not None else ""
-        
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject{genept_suffix}"
+                
+        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
@@ -425,21 +362,7 @@ class SpatialAgingCellDataset(Dataset):
                     node_labels = torch.tensor(sub_adata.X).float()
                 else:
                     node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
-            
-            # Combine with GenePT embeddings if available
-            if self.genept_embeddings is not None:
-                if use_perturbation_expression:
-                    # Use perturbation expression for GenePT combination
-                    genept_augmented_features = self._combine_expression_with_genept(perturbation_expression, sub_adata.var_names)
-                else:
-                    # Use original expression for GenePT combination
-                    genept_augmented_features = self._combine_expression_with_genept(sub_adata.X, sub_adata.var_names)
                 
-                if self.node_feature == "expression":
-                    node_labels = torch.tensor(genept_augmented_features).float()
-                else:
-                    node_labels = torch.cat((node_labels, torch.tensor(genept_augmented_features).float()), 1).float()
-        
         if self.node_feature == "gaussian":
             # random gaussian noise as features
             node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
