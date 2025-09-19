@@ -13,7 +13,7 @@ from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 
 class GNN(torch.nn.Module):
     def __init__(self, hidden_channels, input_dim, output_dim=1, inject_dim=0,
-                 num_layers=3, method="GCN", pool="add", genept_embeddings=None):
+                 num_layers=3, method="GCN", pool="add", genept_embeddings=None, number_genept_embeddings=None):
         super(GNN, self).__init__()
         torch.manual_seed(444)
         
@@ -21,7 +21,8 @@ class GNN(torch.nn.Module):
         self.pool = pool
         self.genept_embeddings = genept_embeddings
         self.genept_embedding_dim = 0
-        
+        self.number_genept_embeddings = number_genept_embeddings
+
         # Set embedding dimension if GenePT embeddings are provided
         if self.genept_embeddings is not None:
             self.genept_embedding_dim = len(next(iter(self.genept_embeddings.values())))
@@ -84,7 +85,7 @@ class GNN(torch.nn.Module):
 
         self._genept_cache_ready = True
 
-    def _create_genept_injection_features(self, x, batch, gene_names, device="cuda", k: int = 10):
+    def _create_genept_injection_features(self, x, batch, gene_names, device="cuda"):
         # Lazy-prepare cache if needed or if gene_names changed in size
         if not getattr(self, "_genept_cache_ready", False) or \
         getattr(self, "_cached_gene_count", None) != len(gene_names):
@@ -101,7 +102,10 @@ class GNN(torch.nn.Module):
 
         mean_expr = global_mean_pool(x, batch)  # uses all nodes per graph
         mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
-        k_eff = min(k, mean_expr_valid.size(1))
+        if self.number_genept_embeddings is None:
+            k_eff = mean_expr_valid.size(1)
+        else:  
+            k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
         vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
         topk_E = genept_embeddings.index_select(0, idx_in_valid.reshape(-1)).reshape(num_graphs, k_eff, -1)
 
@@ -147,7 +151,7 @@ class GNN(torch.nn.Module):
         # Add GenePT embedding features if available
         if (self.genept_embeddings is not None and gene_names is not None):
             genept_features = self._create_genept_injection_features(
-                original_x, batch, gene_names, x.device, k=10
+                original_x, batch, gene_names, x.device
             )
             injection_features.append(genept_features)
         

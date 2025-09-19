@@ -2,10 +2,10 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 3)   # 2 GPUs
+GPUS=(0 1)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
-DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "allen" "kukanja" "androvic" "zeng" "pilot" "liverperturb" "lohoff")
+DATASETS=("aging_coronal" "aging_sagittal")
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 # ----------------
@@ -42,7 +42,9 @@ for dataset in "${DATASETS[@]}"; do
       --epochs 70 \
       --exp_name "benchmark_base_${dataset}" \
       --do_eval \
+      --no_normalize_total \
       --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle" \
+      --number_genept_embeddings None \
       >"$log" 2>&1
 
     status=$?

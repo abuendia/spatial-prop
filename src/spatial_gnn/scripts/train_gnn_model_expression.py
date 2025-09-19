@@ -38,7 +38,8 @@ def train_model_from_scratch(
     test_size: float = 0.2,
     random_state: int = 42,
     stratify_by: Optional[str] = None,
-    genept_embeddings: Optional[str] = None
+    genept_embeddings: Optional[str] = None,
+    number_genept_embeddings: Optional[int] = None
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -91,6 +92,8 @@ def train_model_from_scratch(
         Column name in adata.obs to stratify the split by (only used in AnnData mode)
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
+    number_genept_embeddings : Optional[int], default=None
+        Number of GenePT embeddings to use
     Returns
     -------
     Tuple[GNN, str]
@@ -202,7 +205,8 @@ def train_model_from_scratch(
             method="GIN", 
             pool="add", 
             num_layers=k_hop,
-            genept_embeddings=genept_embeddings
+            genept_embeddings=genept_embeddings,
+            number_genept_embeddings=number_genept_embeddings
         )
     else:
         model = GNN(
@@ -212,7 +216,8 @@ def train_model_from_scratch(
             method="GIN", 
             pool="add", 
             num_layers=k_hop,
-            genept_embeddings=genept_embeddings
+            genept_embeddings=genept_embeddings,
+            number_genept_embeddings=number_genept_embeddings
         )
     model.to(device)
     print(f"Model initialized on {device}")
@@ -247,7 +252,7 @@ def train_model_from_scratch(
     model_dir_name = loss+f"_{learning_rate:.0e}".replace("-","n")
     
     if genept_embeddings is not None:
-        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT")
+        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_{number_genept_embeddings}genes")
     else:
         save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
     if not os.path.exists(save_dir):
@@ -308,7 +313,8 @@ def train_model_from_scratch(
         "data_file_path": file_path,
         "celltypes_to_index": celltypes_to_index,
         "num_cells_per_ct_id": num_cells_per_ct_id,
-        "genept_embeddings": True if genept_embeddings is not None else False
+        "genept_embeddings": True if genept_embeddings is not None else False,
+        "number_genept_embeddings": number_genept_embeddings
     }
     
     config_path = os.path.join(save_dir, "model_config.json")
@@ -346,21 +352,25 @@ def main():
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--num_cells_per_ct_id", help="number of cells per cell type to use for training", type=int, default=100)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
-    parser.add_argument("--normalize_total", action='store_true')
-    parser.add_argument("--no-normalize_total", dest='normalize_total', action='store_false')
+    parser.add_argument("--no_normalize_total", action='store_true', help="Do not normalize total gene expression", default=False)
     parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--do_eval", action='store_true', help="Enable evaluation mode")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
+    parser.add_argument("--number_genept_embeddings", help="Number of GenePT embeddings to use", type=int, default=None)
     
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility when using AnnData (default: 42)")
     parser.add_argument("--stratify_by", type=str, default=None, help="Column name in AnnData.obs to stratify the train/test split by (e.g., 'celltype')")
     
-    parser.set_defaults(normalize_total=True)
     args = parser.parse_args()
+
+    if args.no_normalize_total:
+        args.normalize_total = False
+    else:
+        args.normalize_total = True
 
     # Validate arguments
     if args.dataset and not args.base_path:
@@ -390,7 +400,8 @@ def main():
         test_size=args.test_size,
         random_state=args.random_state,
         stratify_by=args.stratify_by,
-        genept_embeddings=args.genept_embeddings
+        genept_embeddings=args.genept_embeddings,
+        number_genept_embeddings=args.number_genept_embeddings
     )
 
     if args.do_eval:

@@ -21,7 +21,7 @@ dataset_rename = {
     "zeng": "Zeng et al. 2023",
     "allen": "Allen et al. 2023",
     "lohoff": "Lohoff et al. 2021",
-    "liverperturb": "Liverperturb et al. 2023",
+    "liverperturb": "liverperturb",
 }
 
 def macro_avg(metric_dict, metric_key):
