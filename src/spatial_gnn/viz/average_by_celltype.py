@@ -7,8 +7,8 @@ import pickle
 
 metric_name = "Cell - Spearman (mean)"
 datasets = ["aging_coronal", "aging_sagittal", "exercise", "reprogramming", "kukanja", "androvic", "zeng", "pilot", "liverperturb", "lohoff"]
-exclude_datasets = ["allen", "lohoff", "liverperturb"]  # excluded from plot
-
+include_datasets = ["aging_coronal", "aging_sagittal"] 
+exclude_datasets = [d for d in datasets if d not in include_datasets]
 
 dataset_rename = {
     "aging_coronal": "Sun et al. 2024 (aging coronal)",
@@ -49,7 +49,7 @@ def plot_average_by_celltype():
         if dataset in exclude_datasets:
             continue
         results_without_genept_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/weightedl1_1en04/test_evaluation_stats_bycelltype.pkl"
-        results_with_genept_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/weightedl1_1en04_GenePT/test_evaluation_stats_bycelltype.pkl"
+        results_with_genept_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/weightedl1_1en04_GenePT_-1genes/test_evaluation_stats_bycelltype.pkl"
         global_mean_baseline_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/baselines_updated/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/global_mean/test_evaluation_stats_bycelltype.pkl"
         khop_mean_baseline_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/baselines_updated/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/khop_mean/test_evaluation_stats_bycelltype.pkl"
         khop_celltype_mean_baseline_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/baselines_updated/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/khop_celltype_mean/test_evaluation_stats_bycelltype.pkl"

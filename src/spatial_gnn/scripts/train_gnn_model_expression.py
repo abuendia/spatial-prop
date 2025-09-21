@@ -252,7 +252,10 @@ def train_model_from_scratch(
     model_dir_name = loss+f"_{learning_rate:.0e}".replace("-","n")
     
     if genept_embeddings is not None:
-        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_{number_genept_embeddings}genes")
+        if number_genept_embeddings is not None:
+            save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_{number_genept_embeddings}genes")
+        else:
+            save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_all_genes")
     else:
         save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
     if not os.path.exists(save_dir):

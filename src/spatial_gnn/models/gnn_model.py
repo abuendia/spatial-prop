@@ -103,7 +103,7 @@ class GNN(torch.nn.Module):
         mean_expr = global_mean_pool(x, batch)  # uses all nodes per graph
         mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
         if self.number_genept_embeddings is None:
-            k_eff = mean_expr_valid.size(1)
+            k_eff = mean_expr_valid.size(1) # use all genept embeddings
         else:  
             k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
         vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
