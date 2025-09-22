@@ -12,8 +12,18 @@ from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 
 
 class GNN(torch.nn.Module):
-    def __init__(self, hidden_channels, input_dim, output_dim=1, inject_dim=0,
-                 num_layers=3, method="GCN", pool="add", genept_embeddings=None, number_genept_embeddings=None):
+    def __init__(
+        self,
+        hidden_channels,
+        input_dim,
+        output_dim=1,
+        inject_dim=0,
+        num_layers=3,
+        method="GCN",
+        pool="add",
+        genept_embeddings=None,
+        number_genept_embeddings=None
+    ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
         
@@ -95,6 +105,10 @@ class GNN(torch.nn.Module):
         genept_embeddings = self._E_valid  # [G_valid, D]
         valid_idx = self._valid_idx  # [G_valid]
         num_graphs = int(batch.max().item()) + 1
+
+        # Print GenePT embedding statistics
+        num_found = genept_embeddings.size(0)
+        num_requested = self.number_genept_embeddings if self.number_genept_embeddings is not None else num_found
 
         if genept_embeddings.numel() == 0:
             # No overlap between gene_names and genept embeddings

@@ -6,8 +6,6 @@ GPUS=(0 2)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
 DATASETS=("aging_coronal" "aging_sagittal" "allen" "androvic" "exercise" "kukanja" "lohoff" "liverperturb" "pilot" "reprogramming" "zeng")
-LOGDIR="$BASE/logs"
-mkdir -p "$LOGDIR"
 # ----------------
 
 # FIFO as a GPU token pool
@@ -24,11 +22,9 @@ for dataset in "${DATASETS[@]}"; do
   read -r gpu <&3   # blocks until a GPU is free
 
   {
-    ts=$(date +%Y%m%d_%H%M%S)
-    log="$LOGDIR/${dataset}_${ts}.log"
-    echo "[$(date +%T)] start $dataset on GPU $gpu -> $log"
+    echo "[$(date +%T)] start $dataset on GPU $gpu"
 
-    # Run and capture both stdout and stderr to the log file
+    # Run training script (logging is handled internally by the Python script)
     CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
       --dataset "$dataset" \
       --base_path "$BASE/data/raw" \
@@ -42,12 +38,11 @@ for dataset in "${DATASETS[@]}"; do
       --epochs 70 \
       --exp_name "benchmark_base_${dataset}" \
       --do_eval \
-      --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle" \
-      >"$log" 2>&1
+      --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 
     status=$?
     echo "$gpu" >&3      # return GPU token
-    echo "[$(date +%T)] done  $dataset on GPU $gpu (exit $status) | log: $log"
+    echo "[$(date +%T)] done  $dataset on GPU $gpu (exit $status)"
     exit $status
   } &
 done

@@ -6,6 +6,7 @@ import tqdm
 import scanpy as sc
 import json
 import os
+import sys
 
 import torch
 from torch_geometric.loader import DataLoader
@@ -13,6 +14,7 @@ from torch_geometric.loader import DataLoader
 from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
+from spatial_gnn.utils.logging_utils import setup_logging_to_file
 from spatial_gnn.scripts.model_performance import eval_model
 
 
@@ -39,7 +41,8 @@ def train_model_from_scratch(
     random_state: int = 42,
     stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
-    number_genept_embeddings: Optional[int] = None
+    number_genept_embeddings: Optional[int] = None,
+    save_dir: Optional[str] = None
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -118,6 +121,7 @@ def train_model_from_scratch(
     else:
         inject = True
 
+
     print(f"Training on device: {device}", flush=True)
 
     if dataset is not None:
@@ -171,7 +175,9 @@ def train_model_from_scratch(
 
     if genept_embeddings is not None:
         with open(genept_embeddings, "rb") as f:
-            genept_embeddings = pickle.load(f)
+            genept_embeddings_raw = pickle.load(f)
+        # Convert all keys to uppercase
+        genept_embeddings = {k.upper(): v for k, v in genept_embeddings_raw.items()}
 
     # Load data
     all_train_data = []
@@ -244,22 +250,6 @@ def train_model_from_scratch(
     print(f"Starting training for {epochs} epochs...")
     best_score = np.inf
     training_results = {"metric": loss, "epoch": [], "train": [], "test": []}
-
-    # Create directory to save results
-    exp_dir_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
-    if debug:
-        exp_dir_name = f"DEBUG_{exp_dir_name}"
-    model_dir_name = loss+f"_{learning_rate:.0e}".replace("-","n")
-    
-    if genept_embeddings is not None:
-        if number_genept_embeddings is not None:
-            save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_{number_genept_embeddings}genes")
-        else:
-            save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], f"{model_dir_name}_GenePT_all_genes")
-    else:
-        save_dir = os.path.join(f"results/gnn", train_dataset.processed_dir.split("/")[-2], model_dir_name)
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
 
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
 
@@ -355,14 +345,13 @@ def main():
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--num_cells_per_ct_id", help="number of cells per cell type to use for training", type=int, default=100)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
-    parser.add_argument("--no_normalize_total", action='store_true', help="Do not normalize total gene expression", default=False)
     parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--do_eval", action='store_true', help="Enable evaluation mode")
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
     parser.add_argument("--number_genept_embeddings", help="Number of GenePT embeddings to use", type=int, default=None)
-    
+        
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility when using AnnData (default: 42)")
@@ -370,7 +359,7 @@ def main():
     
     args = parser.parse_args()
 
-    if args.no_normalize_total:
+    if args.dataset in ["allen", "liverperturb"]:
         args.normalize_total = False
     else:
         args.normalize_total = True
@@ -381,7 +370,36 @@ def main():
     if args.anndata and args.base_path:
         parser.error("--base_path should not be specified when using --anndata")
 
-    model, _, _, test_loader, save_dir, gene_names = train_model_from_scratch(
+    # Determine dataset name
+    if args.dataset:
+        dataset_name = args.dataset
+    elif args.anndata:
+        dataset_name = args.exp_name if args.exp_name else "unknown"
+    else:
+        dataset_name = "unknown"
+    
+    # Create save directory structure
+    exp_dir_name = f"{dataset_name}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
+    if args.debug:
+        exp_dir_name = f"DEBUG_{exp_dir_name}"
+    model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
+    
+    if args.genept_embeddings is not None:
+        if args.number_genept_embeddings is not None:
+            save_dir = os.path.join(f"results/gnn", exp_dir_name, f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes")
+        else:
+            save_dir = os.path.join(f"results/gnn", exp_dir_name, f"{model_dir_name}_GenePT_all_genes")
+    else:
+        save_dir = os.path.join(f"results/gnn", exp_dir_name, model_dir_name)
+    
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # Set up logging
+    log_file = setup_logging_to_file(save_dir)    
+    print(f"Log file: {os.getcwd()}/{log_file}", file=sys.__stdout__)
+
+    model, _, _, test_loader, _, gene_names = train_model_from_scratch(
         k_hop=args.k_hop,
         augment_hop=args.augment_hop,
         center_celltypes=args.center_celltypes,
@@ -404,7 +422,8 @@ def main():
         random_state=args.random_state,
         stratify_by=args.stratify_by,
         genept_embeddings=args.genept_embeddings,
-        number_genept_embeddings=args.number_genept_embeddings
+        number_genept_embeddings=args.number_genept_embeddings,
+        save_dir=save_dir
     )
 
     if args.do_eval:
