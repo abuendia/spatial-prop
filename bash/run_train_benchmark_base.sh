@@ -37,8 +37,7 @@ for dataset in "${DATASETS[@]}"; do
       --loss weightedl1 \
       --epochs 70 \
       --exp_name "benchmark_base_${dataset}" \
-      --do_eval \
-      --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
+      --do_eval 
 
     status=$?
     echo "$gpu" >&3      # return GPU token

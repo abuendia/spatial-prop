@@ -121,13 +121,33 @@ class GNN(torch.nn.Module):
         else:  
             k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
         vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
-        topk_E = genept_embeddings.index_select(0, idx_in_valid.reshape(-1)).reshape(num_graphs, k_eff, -1)
 
-        weights = vals.unsqueeze(-1)                  # [B, k_eff, 1]
-        num = (weights * topk_E).sum(dim=1)           # [B, D]
-        denom = weights.abs().sum(dim=1).clamp_min(1e-12)  # [B, 1]
-        out = num / denom
-
+        # Process in chunks to avoid OOM
+        chunk_size = min(32, num_graphs)  # Adjust based on available memory
+        out = torch.zeros(num_graphs, self.genept_embedding_dim, device=device, dtype=x.dtype)
+        
+        for i in range(0, num_graphs, chunk_size):
+            end_idx = min(i + chunk_size, num_graphs)
+            chunk_graphs = end_idx - i
+            
+            # Get chunk of indices and embeddings
+            chunk_idx = idx_in_valid[i:end_idx]  # [chunk_graphs, k_eff]
+            chunk_topk_E = genept_embeddings.index_select(0, chunk_idx.reshape(-1)).reshape(chunk_graphs, k_eff, -1)
+            
+            # Get chunk of weights
+            chunk_weights = vals[i:end_idx].unsqueeze(-1)  # [chunk_graphs, k_eff, 1]
+            
+            # Compute weighted sum for this chunk
+            chunk_num = (chunk_weights * chunk_topk_E).sum(dim=1)  # [chunk_graphs, D]
+            chunk_denom = chunk_weights.abs().sum(dim=1).clamp_min(1e-12)  # [chunk_graphs, 1]
+            chunk_out = chunk_num / chunk_denom
+            
+            out[i:end_idx] = chunk_out
+            
+            # Clear intermediate tensors
+            del chunk_topk_E, chunk_weights, chunk_num, chunk_denom, chunk_out
+            torch.cuda.empty_cache()
+        
         return out
 
     def forward(self, x, edge_index, batch, inject=None, gene_names=None):    

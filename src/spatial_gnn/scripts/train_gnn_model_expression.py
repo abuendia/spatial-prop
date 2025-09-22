@@ -398,6 +398,7 @@ def main():
     # Set up logging
     log_file = setup_logging_to_file(save_dir)    
     print(f"Log file: {os.getcwd()}/{log_file}", file=sys.__stdout__)
+    print(f"Normalize total: {args.normalize_total}")
 
     model, _, _, test_loader, _, gene_names = train_model_from_scratch(
         k_hop=args.k_hop,

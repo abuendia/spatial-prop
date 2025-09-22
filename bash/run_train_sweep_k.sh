@@ -2,11 +2,11 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 2 3)   # 2 GPUs
+GPUS=(0 1)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
-DATASETS=("aging_coronal")
-K_HOP=(3 4 5 6)
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "allen" "kukanja" "androvic" "zeng" "pilot" "liverperturb" "lohoff")
+K_HOP=(3)
 # ----------------
 
 # FIFO as a GPU token pool
