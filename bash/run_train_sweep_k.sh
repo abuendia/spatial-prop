@@ -2,11 +2,11 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1)   # 2 GPUs
+GPUS=(0 1 2)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "allen" "kukanja" "androvic" "zeng" "pilot" "liverperturb" "lohoff")
-K_HOP=(3)
+K_HOP=(3 4 5)
 # ----------------
 
 # FIFO as a GPU token pool
@@ -19,8 +19,9 @@ rm -f "$fifo"
 for g in "${GPUS[@]}"; do echo "$g" >&3; done
 
 # launch jobs (one per GPU at a time)
-for dataset in "${DATASETS[@]}"; do
-  for k_hop in "${K_HOP[@]}"; do
+for k_hop in "${K_HOP[@]}"; do
+  for dataset in "${DATASETS[@]}"; do
+
     read -r gpu <&3   # blocks until a GPU is free
 
     {
@@ -37,10 +38,9 @@ for dataset in "${DATASETS[@]}"; do
         --inject_feature none \
         --learning_rate 0.0001 \
         --loss weightedl1 \
-        --epochs 70 \
+        --epochs 100 \
         --exp_name "benchmark_base_${dataset}_k${k_hop}" \
-        --do_eval \
-        --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
+        --do_eval
 
       status=$?
       echo "$gpu" >&3      # return GPU token

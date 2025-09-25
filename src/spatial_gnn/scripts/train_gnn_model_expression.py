@@ -11,7 +11,7 @@ import sys
 import torch
 from torch_geometric.loader import DataLoader
 
-from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
+from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, copy_backbone, copy_base_head, freeze_backbone_and_base_head
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
@@ -42,7 +42,8 @@ def train_model_from_scratch(
     stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
     number_genept_embeddings: Optional[int] = None,
-    save_dir: Optional[str] = None
+    save_dir_baseline: Optional[str] = None,
+    save_dir_genept: Optional[str] = None
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -211,8 +212,6 @@ def train_model_from_scratch(
             method="GIN", 
             pool="add", 
             num_layers=k_hop,
-            genept_embeddings=genept_embeddings,
-            number_genept_embeddings=number_genept_embeddings
         )
     else:
         model = GNN(
@@ -222,8 +221,6 @@ def train_model_from_scratch(
             method="GIN", 
             pool="add", 
             num_layers=k_hop,
-            genept_embeddings=genept_embeddings,
-            number_genept_embeddings=number_genept_embeddings
         )
     model.to(device)
     print(f"Model initialized on {device}")
@@ -255,15 +252,15 @@ def train_model_from_scratch(
 
     for epoch in range(1, epochs + 1):
         # Training
-        train(model, train_loader, criterion, optimizer, gene_names=gene_names, inject=inject, device=device)
+        train(model, train_loader, criterion, optimizer, inject=inject, device=device)
         
         # Evaluation
-        train_score = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
-        test_score = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+        train_score = test(model, train_loader, loss, criterion, inject=inject, device=device)
+        test_score = test(model, test_loader, loss, criterion, inject=inject, device=device)
         
         # Save best model
         if test_score < best_score:
-            torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pth"))
+            torch.save(model.state_dict(), os.path.join(save_dir_baseline, "best_model.pth"))
             best_score = test_score
         
         # Log results
@@ -282,11 +279,11 @@ def train_model_from_scratch(
         training_results["train"].append(train_score)    
         training_results["test"].append(test_score)
 
-    # Save final model
-    final_model_path = os.path.join(save_dir, "model.pth")
+    # Save baseline model
+    final_model_path = os.path.join(save_dir_baseline, "model.pth")
     torch.save(model.state_dict(), final_model_path)
     
-    # Save model configuration
+    # Save baseline model configuration
     model_config = {
         "input_dim": int(train_dataset.get(0).x.shape[1]),
         "output_dim": len(train_dataset.get(0).y),
@@ -306,23 +303,98 @@ def train_model_from_scratch(
         "data_file_path": file_path,
         "celltypes_to_index": celltypes_to_index,
         "num_cells_per_ct_id": num_cells_per_ct_id,
-        "genept_embeddings": True if genept_embeddings is not None else False,
+        "genept_embeddings": False,
         "number_genept_embeddings": number_genept_embeddings
     }
     
-    config_path = os.path.join(save_dir, "model_config.json")
+    config_path = os.path.join(save_dir_baseline, "config.json")
     with open(config_path, 'w') as f:
         json.dump(model_config, f, indent=2)
     
-    print(f"Training completed. Model saved to {final_model_path}")
-    print(f"Model configuration saved to {config_path}")
-
-    # Save training results
-    with open(os.path.join(save_dir, "training.pkl"), 'wb') as f:
+    print(f"Training completed. Baseline model saved to {final_model_path}")
+    print(f"Baseline configuration saved to {config_path}")
+    
+    # Save baseline training results
+    with open(os.path.join(save_dir_baseline, "training.pkl"), 'wb') as f:
         pickle.dump(training_results, f)
-    print("Training logs saved")
+    print("Baseline training logs saved")
 
-    return model, model_config, final_model_path, test_loader, save_dir, gene_names
+    # GenePT linear probe (only if embeddings are provided)
+    genept_model, genept_config, genept_final_model_path = None, None, None
+    if genept_embeddings is not None:
+        print("Starting GenePT linear-probe phase (freeze backbone, train head only)...", flush=True)
+        # Build GenePT-enabled model
+        if inject is True:
+            genept_model = GNN(
+                hidden_channels=64,
+                input_dim=int(train_dataset.get(0).x.shape[1]),
+                output_dim=len(train_dataset.get(0).y),
+                inject_dim=int(train_dataset.get(0).inject.shape[1]),
+                method="GIN",
+                pool="add",
+                num_layers=k_hop,
+                genept_embeddings=genept_embeddings,
+                number_genept_embeddings=number_genept_embeddings
+            )
+        else:
+            genept_model = GNN(
+                hidden_channels=64,
+                input_dim=int(train_dataset.get(0).x.shape[1]),
+                output_dim=len(train_dataset.get(0).y),
+                method="GIN",
+                pool="add",
+                num_layers=k_hop,
+                genept_embeddings=genept_embeddings,
+                number_genept_embeddings=number_genept_embeddings
+            )
+        genept_model.to(device)
+
+        copy_backbone(genept_model, model)
+        copy_base_head(genept_model, model)
+        freeze_backbone_and_base_head(genept_model)
+        head_optimizer = torch.optim.Adam(genept_model.lin_genept.parameters(), lr=learning_rate)
+
+        # Training loop (linear probe)
+        best_genept = np.inf
+        lp_results = {"metric": loss, "epoch": [], "train": [], "test": []}
+        for epoch in range(1, epochs + 1):
+            train(genept_model, train_loader, criterion, head_optimizer, gene_names=gene_names, inject=inject, device=device)
+            train_score = test(genept_model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+            test_score = test(genept_model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+            if test_score < best_genept:
+                torch.save(genept_model.state_dict(), os.path.join(save_dir_genept, "best_model.pth"))
+                best_genept = test_score
+            if loss == "mse":
+                print(f'[GenePT-LP] Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}', flush=True)
+            elif loss == "l1":
+                print(f'[GenePT-LP] Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}', flush=True)
+            elif loss == "weightedl1":
+                print(f'[GenePT-LP] Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}', flush=True)
+            elif loss == "balanced_mse":
+                print(f'[GenePT-LP] Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}', flush=True)
+            elif loss == "npcc":
+                print(f'[GenePT-LP] Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}', flush=True)
+            lp_results["epoch"].append(epoch)
+            lp_results["train"].append(train_score)
+            lp_results["test"].append(test_score)
+
+        genept_final_model_path = os.path.join(save_dir_genept, "model.pth")
+        torch.save(genept_model.state_dict(), genept_final_model_path)
+
+        genept_config = {
+            **model_config,
+            "genept_embeddings": True,
+            "number_genept_embeddings": number_genept_embeddings,
+        }
+        with open(os.path.join(save_dir_genept, "config.json"), 'w') as f:
+            json.dump(genept_config, f, indent=2)
+
+        with open(os.path.join(save_dir_genept, "training.pkl"), 'wb') as f:
+            pickle.dump(lp_results, f)
+
+        print(f"GenePT linear-probe completed. Model saved to {genept_final_model_path}")
+
+    return test_loader, gene_names, (model, model_config, final_model_path), (genept_model, genept_config, genept_final_model_path)
 
 
 def main():
@@ -384,23 +456,22 @@ def main():
         exp_dir_name = f"DEBUG_{exp_dir_name}"
     model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
     
-    if args.genept_embeddings is not None:
-        if args.number_genept_embeddings is not None:
-            save_dir = os.path.join(f"results/gnn", exp_dir_name, f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes")
-        else:
-            save_dir = os.path.join(f"results/gnn", exp_dir_name, f"{model_dir_name}_GenePT_all_genes")
+    if args.number_genept_embeddings is not None:
+        genept_model_dirname = f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes"
     else:
-        save_dir = os.path.join(f"results/gnn", exp_dir_name, model_dir_name)
+        genept_model_dirname = f"{model_dir_name}_GenePT_all_genes"
+    baseline_save_dir = os.path.join("clean/results/gnn", exp_dir_name, model_dir_name)
+    genept_save_dir = os.path.join("clean/results/gnn", exp_dir_name, genept_model_dirname)
     
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    os.makedirs(baseline_save_dir, exist_ok=True)
+    os.makedirs(genept_save_dir, exist_ok=True)
     
     # Set up logging
-    log_file = setup_logging_to_file(save_dir)    
+    log_file = setup_logging_to_file(os.path.join("clean/results/gnn", exp_dir_name)) 
     print(f"Log file: {os.getcwd()}/{log_file}", file=sys.__stdout__)
     print(f"Normalize total: {args.normalize_total}")
 
-    model, _, _, test_loader, _, gene_names = train_model_from_scratch(
+    test_loader, gene_names, (model, model_config, _), (genept_model, genept_config, _) = train_model_from_scratch(
         k_hop=args.k_hop,
         augment_hop=args.augment_hop,
         center_celltypes=args.center_celltypes,
@@ -424,18 +495,31 @@ def main():
         stratify_by=args.stratify_by,
         genept_embeddings=args.genept_embeddings,
         number_genept_embeddings=args.number_genept_embeddings,
-        save_dir=save_dir
+        save_dir_baseline=baseline_save_dir,
+        save_dir_genept=genept_save_dir
     )
 
+    
     if args.do_eval:
+        # Baseline eval
         eval_model(
             model=model,
             test_loader=test_loader,
-            save_dir=save_dir,
+            save_dir=baseline_save_dir,
             device=args.device,
             inject=False,
             gene_names=gene_names
         )
+
+        if genept_model is not None:
+            eval_model(
+                model=genept_model,
+                test_loader=test_loader,
+                save_dir=genept_save_dir,
+                device=args.device,
+                inject=False,
+                gene_names=gene_names
+            )
 
 
 if __name__ == "__main__":

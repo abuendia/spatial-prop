@@ -29,9 +29,14 @@ class GNN(torch.nn.Module):
         
         self.method = method
         self.pool = pool
+        self.inject_dim = inject_dim
+
         self.genept_embeddings = genept_embeddings
         self.genept_embedding_dim = 0
         self.number_genept_embeddings = number_genept_embeddings
+        self._genept_cache_ready = False
+        self._cached_gene_count = None
+        self._has_genept = genept_embeddings is not None
 
         # Set embedding dimension if GenePT embeddings are provided
         if self.genept_embeddings is not None:
@@ -67,12 +72,16 @@ class GNN(torch.nn.Module):
         else:
             raise Exception("'method' not recognized.")
         
-        # Adjust inject_dim if GenePT embeddings are used
-        if self.genept_embeddings is not None:
-            # Single weighted embedding vector from neighbor context
-            inject_dim += self.genept_embedding_dim
-            
-        self.lin = Linear(hidden_channels+inject_dim, output_dim)
+        self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+
+        if self._has_genept:
+            self.lin_genept = Linear(self.genept_embedding_dim, output_dim)
+            with torch.no_grad():
+                self.lin_genept.weight.zero_()
+                if self.lin_genept.bias is not None:
+                    self.lin_genept.bias.zero_()
+        else:
+            self.lin_genept = None
 
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
         # Map genes -> row in embedding matrix
@@ -105,10 +114,6 @@ class GNN(torch.nn.Module):
         genept_embeddings = self._E_valid  # [G_valid, D]
         valid_idx = self._valid_idx  # [G_valid]
         num_graphs = int(batch.max().item()) + 1
-
-        # Print GenePT embedding statistics
-        num_found = genept_embeddings.size(0)
-        num_requested = self.number_genept_embeddings if self.number_genept_embeddings is not None else num_found
 
         if genept_embeddings.numel() == 0:
             # No overlap between gene_names and genept embeddings
@@ -146,58 +151,67 @@ class GNN(torch.nn.Module):
             
             # Clear intermediate tensors
             del chunk_topk_E, chunk_weights, chunk_num, chunk_denom, chunk_out
-            torch.cuda.empty_cache()
         
         return out
-
-    def forward(self, x, edge_index, batch, inject=None, gene_names=None):    
-        # Store original x for GenePT feature extraction
-        original_x = x
-        
-        # node embeddings 
+      
+    def _backbone_forward(self, x, edge_index):
         x = F.relu(self.conv1(x, edge_index))
         for layer_idx, conv in enumerate(self.convs):
             if layer_idx < len(self.convs) - 1:
                 x = F.relu(conv(x, edge_index))
             else:
                 x = conv(x, edge_index)
-
-        # pooling and readout
-        if self.pool == "mean":
-            x = global_mean_pool(x, batch)
-        elif self.pool == "add":
-            x = global_add_pool(x, batch)
-        elif self.pool == "max":
-            x = global_max_pool(x, batch)
-        else:
-            raise Exception ("'pool' not recognized")
-
-        # final prediction
-        x = F.dropout(x, p=0.1, training=self.training)
-        
-        # Prepare injection features
-        injection_features = []
-        
-        # Add existing inject features if provided
-        if inject is not None:
-            injection_features.append(inject)
-        
-        # Add GenePT embedding features if available
-        if (self.genept_embeddings is not None and gene_names is not None):
-            genept_features = self._create_genept_injection_features(
-                original_x, batch, gene_names, x.device
-            )
-            injection_features.append(genept_features)
-        
-        # Concatenate all injection features
-        if injection_features:
-            all_inject_features = torch.cat(injection_features, dim=1)
-            x = self.lin(torch.cat((x, all_inject_features), dim=1))
-        else:
-            x = self.lin(x)
-        
         return x
-    
+
+    def _pool(self, x, batch):
+        if self.pool == "mean":
+            return global_mean_pool(x, batch)
+        elif self.pool == "add":
+            return global_add_pool(x, batch)
+        elif self.pool == "max":
+            return global_max_pool(x, batch)
+        else:
+            raise ValueError(f"'pool' not recognized: {self.pool}")
+
+    def forward(self, x, edge_index, batch, inject=None, gene_names=None):
+        """
+        - Base path: pooled backbone (plus optional 'inject') -> lin_base
+        - Residual path (if available): GenePT features -> lin_genept
+        Total = base + residual
+        """
+        original_x = x  
+        x = self._backbone_forward(x, edge_index)
+        x = self._pool(x, batch)
+        x = F.dropout(x, p=0.1, training=self.training)
+        base_in = x if inject is None else torch.cat([x, inject], dim=1)
+        out = self.lin_base(base_in)
+
+        # Add GenePT residual
+        if self._has_genept and (gene_names is not None):
+            genept_vec = self._create_genept_injection_features(original_x, batch, gene_names, x.device)
+            out = out + self.lin_genept(genept_vec)
+
+        return out
+
+@torch.no_grad()
+def copy_backbone(dst, src):
+    dst_sd, src_sd = dst.state_dict(), src.state_dict()
+    for k, v in src_sd.items():
+        if k.startswith("lin_base.") or (dst.lin_genept is not None and k.startswith("lin_genept.")):
+            continue
+        if k in dst_sd and dst_sd[k].shape == v.shape:
+            dst_sd[k].copy_(v)
+    dst.load_state_dict(dst_sd, strict=False)
+
+@torch.no_grad()
+def copy_base_head(dst, src):
+    dst.lin_base.weight.copy_(src.lin_base.weight)
+    if dst.lin_base.bias is not None and src.lin_base.bias is not None:
+        dst.lin_base.bias.copy_(src.lin_base.bias)
+
+def freeze_backbone_and_base_head(model):
+    for name, p in model.named_parameters():
+        p.requires_grad = name.startswith("lin_genept")
 
 def bmc_loss(pred, target, noise_var):
     """Compute the Multidimensional Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
@@ -291,10 +305,6 @@ class WeightedL1Loss(_Loss):
         loss = weighted_l1_loss(predictions, targets, self.zero_weight, self.nonzero_weight)
         
         return loss
-
-
-
-
 
 
 def train(model, loader, criterion, optimizer, gene_names=None, inject=False, device="cuda"):
