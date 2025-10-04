@@ -38,13 +38,16 @@ def main():
     parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
+    parser.add_argument("--debug", help="Enable debug mode with subset of data for quick testing", action="store_true")
+    parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
+    parser.add_argument("--number_genept_embeddings", help="Number of GenePT embeddings to use", type=int, default=None)
     args = parser.parse_args()
 
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
     
     # set which model to use
-    use_model = "best_model"
+    use_model = "model"
 
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
@@ -84,10 +87,19 @@ def main():
     celltypes_to_index = {}
     for ci, cellt in enumerate(dataset_config["celltypes"]):
         celltypes_to_index[cellt] = ci
+
+    if args.dataset is not None:
+        exp_name = args.dataset
+
+    if args.genept_embeddings is not None:
+        with open(args.genept_embeddings, "rb") as f:
+            genept_embeddings_raw = pickle.load(f)
+        # Convert all keys to uppercase
+        genept_embeddings = {k.upper(): v for k, v in genept_embeddings_raw.items()}
     
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
-                                            dataset_prefix=args.exp_name,
+                                            dataset_prefix=exp_name,
                                             target="expression",
                                             k_hop=k_hop,
                                             augment_hop=augment_hop,
@@ -101,7 +113,7 @@ def main():
                                             celltypes_to_index=celltypes_to_index)
 
     test_dataset = SpatialAgingCellDataset(subfolder_name="test",
-                                        dataset_prefix=args.exp_name,
+                                        dataset_prefix=exp_name,
                                         target="expression",
                                         k_hop=k_hop,
                                         augment_hop=augment_hop,
@@ -134,7 +146,9 @@ def main():
             inject_dim=int(train_dataset.get(0).inject.shape[1]),
             method="GIN", 
             pool="add", 
-            num_layers=k_hop
+            num_layers=k_hop,
+            genept_embeddings=genept_embeddings,
+            number_genept_embeddings=args.number_genept_embeddings
         )
     else:
         model = GNN(
@@ -143,22 +157,34 @@ def main():
             output_dim=len(train_dataset.get(0).y),
             method="GIN", 
             pool="add", 
-            num_layers=k_hop
+            num_layers=k_hop,
+            genept_embeddings=genept_embeddings,
+            number_genept_embeddings=args.number_genept_embeddings
         )
 
     print(f"Model initialized on {device}")
 
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
 
-    # create directory to save results
-    model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
-    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname)
+    # Create save directory structure
+    exp_dir_name = f"{args.dataset}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
+    if args.debug:
+        exp_dir_name = f"DEBUG_{exp_dir_name}"
+    model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
+    
+    if args.genept_embeddings is not None:
+        if args.number_genept_embeddings is not None:
+            model_dir_name = f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes"
+        else:
+            model_dir_name = f"{model_dir_name}_GenePT_all_genes"
 
-    model.load_state_dict(torch.load(os.path.join(save_dir, f"{use_model}.pth")))
+    model_save_dir = os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
+
+    model.load_state_dict(torch.load(os.path.join(model_save_dir, f"{use_model}.pth")), strict=False)
     model.to(device)
     print(profile.count_parameters(model), flush=True)
 
-    eval_model(model, test_loader, save_dir, device, inject, gene_names)
+    eval_model(model, test_loader, model_save_dir, device, inject, gene_names)
 
 
 def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_names=None):
@@ -199,18 +225,24 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
             out = model(data.x, data.edge_index, data.batch, None, gene_names) 
         else:
             out = model(data.x, data.edge_index, data.batch, data.inject, gene_names)
-        preds.append(out)
+        
+        # Move to CPU immediately to free GPU memory
+        preds.append(out.detach().cpu())
         
         if data.y.shape != out.shape:
-            actuals.append(torch.reshape(data.y.float(), out.shape))
+            actuals.append(torch.reshape(data.y.float(), out.shape).detach().cpu())
         else:
-            actuals.append(data.y.float()) # [[512, 300]]
+            actuals.append(data.y.float().detach().cpu()) # [[512, 300]]
 
         # get cell type
         celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
+        
+        # Clear GPU memory after each batch
+        del out, data
+        torch.cuda.empty_cache()
     
-    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds]) # [num_cells, num_genes]
-    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals]) # [num_cells, num_genes]
+    preds = np.concatenate([pred.numpy() for pred in preds]) # [num_cells, num_genes]
+    actuals = np.concatenate([act.numpy() for act in actuals]) # [num_cells, num_genes]
     celltypes = np.array(celltypes) # [num_cells,]
 
     # drop genes that are missing everywhere

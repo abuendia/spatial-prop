@@ -2,10 +2,10 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 2)   # 2 GPUs
+GPUS=(3) # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
-DATASETS=("aging_coronal" "aging_sagittal" "allen" "androvic" "exercise" "kukanja" "lohoff" "liverperturb" "pilot" "reprogramming" "zeng")
+DATASETS=("aging_sagittal" "allen" "androvic" "exercise" "kukanja" "lohoff" "liverperturb" "pilot" "reprogramming" "zeng" "aging_coronal")
 # ----------------
 
 # FIFO as a GPU token pool
@@ -35,8 +35,8 @@ for dataset in "${DATASETS[@]}"; do
       --inject_feature none \
       --learning_rate 0.0001 \
       --loss weightedl1 \
-      --epochs 100 \
-      --exp_name "benchmark_base_${dataset}" \
+      --epochs 50 \
+      --exp_name xattn \
       --do_eval \
       --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle" 
 

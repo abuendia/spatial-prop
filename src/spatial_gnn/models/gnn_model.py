@@ -75,14 +75,10 @@ class GNN(torch.nn.Module):
         self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
 
         if self._has_genept:
-            self.lin_genept = Linear(self.genept_embedding_dim, output_dim)
-            with torch.no_grad():
-                self.lin_genept.weight.zero_()
-                if self.lin_genept.bias is not None:
-                    self.lin_genept.bias.zero_()
-        else:
-            self.lin_genept = None
-
+            # cross-attention
+            self.genept_to_hidden = Linear(self.genept_embedding_dim, hidden_channels)
+            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=4, batch_first=True)
+        
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
         # Map genes -> row in embedding matrix
         valid_rows, valid_idx = [], []
@@ -102,6 +98,7 @@ class GNN(torch.nn.Module):
             self.register_buffer("_E_valid", E_valid.to(device))
             self.register_buffer("_valid_idx", valid_idx.to(device))
 
+        print("GenePT overlap: ", len(valid_rows), "/", len(gene_names))
         self._genept_cache_ready = True
 
     def _create_genept_injection_features(self, x, batch, gene_names, device="cuda"):
@@ -153,15 +150,35 @@ class GNN(torch.nn.Module):
             del chunk_topk_E, chunk_weights, chunk_num, chunk_denom, chunk_out
         
         return out
-      
-    def _backbone_forward(self, x, edge_index):
-        x = F.relu(self.conv1(x, edge_index))
-        for layer_idx, conv in enumerate(self.convs):
-            if layer_idx < len(self.convs) - 1:
-                x = F.relu(conv(x, edge_index))
-            else:
-                x = conv(x, edge_index)
-        return x
+
+    def _genept_topk_tokens(self, x, batch, gene_names, device="cuda"):
+        if (not getattr(self, "_genept_cache_ready", False)) or \
+        (getattr(self, "_cached_gene_count", None) != len(gene_names)):
+            self._prepare_genept_lookup(gene_names, device)
+            self._cached_gene_count = len(gene_names)
+        
+        E_valid = self._E_valid  # [valid_genes, D]
+        valid_idx = self._valid_idx  # [valid_genes]
+        num_graphs = int(batch.max().item()) + 1
+
+        if E_valid.numel() == 0:
+            # No overlap between gene_names and genept embeddings
+            return x.new_zeros((num_graphs, 1, self.genept_embedding_dim))
+        
+        mean_expr = global_mean_pool(x, batch) 
+        mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
+
+        if self.number_genept_embeddings is None:
+            k_eff = mean_expr_valid.size(1) # Use all genept embeddings
+        else:  
+            k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
+
+        vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
+        del vals
+
+        flattened_idx = idx_in_valid.reshape(-1)
+        tokens = E_valid.index_select(0, flattened_idx).reshape(num_graphs, k_eff, -1)
+        return tokens
 
     def _pool(self, x, batch):
         if self.pool == "mean":
@@ -174,44 +191,37 @@ class GNN(torch.nn.Module):
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
     def forward(self, x, edge_index, batch, inject=None, gene_names=None):
-        """
-        - Base path: pooled backbone (plus optional 'inject') -> lin_base
-        - Residual path (if available): GenePT features -> lin_genept
-        Total = base + residual
-        """
-        original_x = x  
-        x = self._backbone_forward(x, edge_index)
-        x = self._pool(x, batch)
-        x = F.dropout(x, p=0.1, training=self.training)
-        base_in = x if inject is None else torch.cat([x, inject], dim=1)
-        out = self.lin_base(base_in)
+        genept_tokens = None
 
-        # Add GenePT residual
         if self._has_genept and (gene_names is not None):
-            genept_vec = self._create_genept_injection_features(original_x, batch, gene_names, x.device)
-            out = out + self.lin_genept(genept_vec)
+            genept_tokens = self._genept_topk_tokens(x, batch, gene_names, device=x.device)
 
+        h = self.conv1(x, edge_index)
+        h = F.relu(h)
+
+        for i, conv in enumerate(self.convs):
+            if i == len(self.convs)-1:
+                h = conv(h, edge_index)
+            else:
+                h = F.relu(conv(h, edge_index))
+
+        pooled = self._pool(h, batch)
+
+        if (genept_tokens is not None) and (self.xattn is not None):
+            tokens_h = self.genept_to_hidden(genept_tokens)
+            query = pooled.unsqueeze(1)
+            fused, _ = self.xattn(query, tokens_h, tokens_h)
+            fused_pooled = fused.squeeze(1)
+            
+            # Clear intermediate tensors to free memory
+            del genept_tokens, tokens_h, query, fused
+        else:
+            fused_pooled = pooled
+        
+        fused_pooled = F.dropout(fused_pooled, p=0.1, training=self.training)
+        base_in = fused_pooled if inject is None else torch.cat([fused_pooled, inject], dim=1)
+        out = self.lin_base(base_in)
         return out
-
-@torch.no_grad()
-def copy_backbone(dst, src):
-    dst_sd, src_sd = dst.state_dict(), src.state_dict()
-    for k, v in src_sd.items():
-        if k.startswith("lin_base.") or (dst.lin_genept is not None and k.startswith("lin_genept.")):
-            continue
-        if k in dst_sd and dst_sd[k].shape == v.shape:
-            dst_sd[k].copy_(v)
-    dst.load_state_dict(dst_sd, strict=False)
-
-@torch.no_grad()
-def copy_base_head(dst, src):
-    dst.lin_base.weight.copy_(src.lin_base.weight)
-    if dst.lin_base.bias is not None and src.lin_base.bias is not None:
-        dst.lin_base.bias.copy_(src.lin_base.bias)
-
-def freeze_backbone_and_base_head(model):
-    for name, p in model.named_parameters():
-        p.requires_grad = name.startswith("lin_genept")
 
 def bmc_loss(pred, target, noise_var):
     """Compute the Multidimensional Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
