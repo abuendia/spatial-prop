@@ -41,7 +41,6 @@ def train_model_from_scratch(
     random_state: int = 42,
     stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
-    number_genept_embeddings: Optional[int] = None,
     model_save_dir: Optional[str] = None,
     genept_lr_multiplier: float = 2.0
 ) -> Tuple[GNN, str]:
@@ -96,8 +95,6 @@ def train_model_from_scratch(
         Column name in adata.obs to stratify the split by (only used in AnnData mode)
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
-    number_genept_embeddings : Optional[int], default=None
-        Number of GenePT embeddings to use
     Returns
     -------
     Tuple[GNN, str]
@@ -218,7 +215,6 @@ def train_model_from_scratch(
                 pool="add", 
                 num_layers=k_hop,
                 genept_embeddings=genept_embeddings,
-                number_genept_embeddings=number_genept_embeddings
             )
         else:
             model = GNN(
@@ -229,7 +225,6 @@ def train_model_from_scratch(
                 pool="add", 
                 num_layers=k_hop,
                 genept_embeddings=genept_embeddings,
-                number_genept_embeddings=number_genept_embeddings
             )
     else:
         print("Initializing baseline model without GenePT embeddings...", flush=True)
@@ -274,18 +269,18 @@ def train_model_from_scratch(
         raise ValueError(f"Loss '{loss}' is not recognized!")
 
     # Training loop
-    model_type = "GenePT-Joint" if use_genept else "Baseline"
+    model_type = "GenePT" if use_genept else "Baseline"
     print(f"Starting {model_type} training for {epochs} epochs...")
     best_score = np.inf
-    training_results = {"metric": loss, "epoch": [], "train": [], "test": []}
+    training_results = {"metric": loss, "epoch": [], "train": [], "test": [], "test_spearman": []}
 
     for epoch in range(1, epochs + 1):
         # Training
         train(model, train_loader, criterion, optimizer, gene_names=gene_names, inject=inject, device=device)
 
 
-        train_score = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
-        test_score = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+        train_score, _ = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
+        test_score, test_spearman = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
 
         # Save best model
         if test_score < best_score:
@@ -296,19 +291,20 @@ def train_model_from_scratch(
         # Log results
         prefix = f'[{model_type}]' if use_genept else ''
         if loss == "mse":
-            print(f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}', flush=True)
+            print(f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}, Test Spearman: {test_spearman:.4f}', flush=True)
         elif loss == "l1":
-            print(f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}', flush=True)
+            print(f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}', flush=True)
         elif loss == "weightedl1":
-            print(f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}', flush=True)
+            print(f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}', flush=True)
         elif loss == "balanced_mse":
-            print(f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}', flush=True)
+            print(f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}', flush=True)
         elif loss == "npcc":
-            print(f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}', flush=True)
+            print(f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}', flush=True)
             
         training_results["epoch"].append(epoch)
         training_results["train"].append(train_score)    
         training_results["test"].append(test_score)
+        training_results["test_spearman"].append(test_spearman)
 
     # Save final model
     save_dir = model_save_dir
@@ -336,7 +332,6 @@ def train_model_from_scratch(
         "celltypes_to_index": celltypes_to_index,
         "num_cells_per_ct_id": num_cells_per_ct_id,
         "genept_embeddings": use_genept,
-        "number_genept_embeddings": number_genept_embeddings,
         "genept_lr_multiplier": genept_lr_multiplier if use_genept else None
     }
     
@@ -380,7 +375,6 @@ def main():
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
-    parser.add_argument("--number_genept_embeddings", help="Number of GenePT embeddings to use", type=int, default=None)
     parser.add_argument("--genept_lr_multiplier", help="Learning rate multiplier for GenePT head", type=float, default=2.0)
         
     # AnnData-specific arguments
@@ -413,12 +407,9 @@ def main():
     exp_dir_name = f"{dataset_name}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
     if args.debug:
         exp_dir_name = f"DEBUG_{exp_dir_name}"
+
     model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
-    
-    if args.number_genept_embeddings is not None:
-        model_dir_name = f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes"
-    else:
-        model_dir_name = f"{model_dir_name}_GenePT_all_genes"
+    model_dir_name = f"{model_dir_name}_GenePT_all_genes"
 
     model_save_dir = os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
     os.makedirs(model_save_dir, exist_ok=True)
@@ -426,7 +417,6 @@ def main():
     # Set up logging
     log_file = setup_logging_to_file(os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name)) 
     print(f"Log file: {os.getcwd()}/{log_file}", file=sys.__stdout__)
-    print(f"Normalize total: {args.normalize_total}")
 
     test_loader, gene_names, (model, model_config, _) = train_model_from_scratch(
         k_hop=args.k_hop,
@@ -451,7 +441,6 @@ def main():
         random_state=args.random_state,
         stratify_by=args.stratify_by,
         genept_embeddings=args.genept_embeddings,
-        number_genept_embeddings=args.number_genept_embeddings,
         model_save_dir=model_save_dir,
         genept_lr_multiplier=args.genept_lr_multiplier
     )

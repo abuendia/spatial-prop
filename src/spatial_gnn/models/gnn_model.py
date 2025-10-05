@@ -5,10 +5,12 @@ from tqdm import tqdm
 
 import torch
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
-from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList
+from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList, LayerNorm, Dropout
 import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
 from torch.distributions.multivariate_normal import MultivariateNormal as MVN
+
+from spatial_gnn.utils.metric_utils import compute_spearman
 
 
 class GNN(torch.nn.Module):
@@ -22,7 +24,6 @@ class GNN(torch.nn.Module):
         method="GCN",
         pool="add",
         genept_embeddings=None,
-        number_genept_embeddings=None
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -33,10 +34,10 @@ class GNN(torch.nn.Module):
 
         self.genept_embeddings = genept_embeddings
         self.genept_embedding_dim = 0
-        self.number_genept_embeddings = number_genept_embeddings
         self._genept_cache_ready = False
         self._cached_gene_count = None
         self._has_genept = genept_embeddings is not None
+        readout_dim = 128
 
         # Set embedding dimension if GenePT embeddings are provided
         if self.genept_embeddings is not None:
@@ -76,9 +77,21 @@ class GNN(torch.nn.Module):
 
         if self._has_genept:
             # cross-attention
+            self.q_proj = Linear(hidden_channels, hidden_channels)
+            self.k_proj = Linear(hidden_channels, hidden_channels)
             self.genept_to_hidden = Linear(self.genept_embedding_dim, hidden_channels)
-            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=4, batch_first=True)
-        
+            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=8, batch_first=True)
+
+            self.pre_attn_ln = LayerNorm(hidden_channels)
+            self.post_attn_ln = LayerNorm(hidden_channels)
+
+            self.genept_dropout = Dropout(0.15)
+            self.fuse_gate = Sequential(
+                Linear(hidden_channels, hidden_channels),
+                ReLU(),
+                Linear(hidden_channels, 1)
+            )
+
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
         # Map genes -> row in embedding matrix
         valid_rows, valid_idx = [], []
@@ -101,55 +114,27 @@ class GNN(torch.nn.Module):
         print("GenePT overlap: ", len(valid_rows), "/", len(gene_names))
         self._genept_cache_ready = True
 
-    def _create_genept_injection_features(self, x, batch, gene_names, device="cuda"):
-        # Lazy-prepare cache if needed or if gene_names changed in size
-        if not getattr(self, "_genept_cache_ready", False) or \
-        getattr(self, "_cached_gene_count", None) != len(gene_names):
+    def _compute_genept_weighted_embedding(self, x, batch, gene_names, device=None):
+        if (not self._genept_cache_ready) or (getattr(self, "_cached_gene_count", None) != len(gene_names)):
             self._prepare_genept_lookup(gene_names, device)
             self._cached_gene_count = len(gene_names)
-
-        genept_embeddings = self._E_valid  # [G_valid, D]
-        valid_idx = self._valid_idx  # [G_valid]
-        num_graphs = int(batch.max().item()) + 1
-
-        if genept_embeddings.numel() == 0:
-            # No overlap between gene_names and genept embeddings
-            return x.new_zeros((num_graphs, self.genept_embedding_dim))
-
-        mean_expr = global_mean_pool(x, batch)  # uses all nodes per graph
-        mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
-        if self.number_genept_embeddings is None:
-            k_eff = mean_expr_valid.size(1) # use all genept embeddings
-        else:  
-            k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
-        vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
-
-        # Process in chunks to avoid OOM
-        chunk_size = min(32, num_graphs)  # Adjust based on available memory
-        out = torch.zeros(num_graphs, self.genept_embedding_dim, device=device, dtype=x.dtype)
         
-        for i in range(0, num_graphs, chunk_size):
-            end_idx = min(i + chunk_size, num_graphs)
-            chunk_graphs = end_idx - i
-            
-            # Get chunk of indices and embeddings
-            chunk_idx = idx_in_valid[i:end_idx]  # [chunk_graphs, k_eff]
-            chunk_topk_E = genept_embeddings.index_select(0, chunk_idx.reshape(-1)).reshape(chunk_graphs, k_eff, -1)
-            
-            # Get chunk of weights
-            chunk_weights = vals[i:end_idx].unsqueeze(-1)  # [chunk_graphs, k_eff, 1]
-            
-            # Compute weighted sum for this chunk
-            chunk_num = (chunk_weights * chunk_topk_E).sum(dim=1)  # [chunk_graphs, D]
-            chunk_denom = chunk_weights.abs().sum(dim=1).clamp_min(1e-12)  # [chunk_graphs, 1]
-            chunk_out = chunk_num / chunk_denom
-            
-            out[i:end_idx] = chunk_out
-            
-            # Clear intermediate tensors
-            del chunk_topk_E, chunk_weights, chunk_num, chunk_denom, chunk_out
+        E_valid = self._E_valid  # [valid_genes, D]
+        valid_idx = self._valid_idx  # [valid_genes]
+        B = int(batch.max().item()) + 1
+
+        if E_valid.numel() == 0:
+            return x.new_zeros((B, 1, self.genept_embedding_dim))
         
-        return out
+        mean_expr = global_mean_pool(x, batch)
+        expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
+        
+        weights = expr_valid / (expr_valid.sum(dim=1, keepdim=True) + 1e-12)
+        weighted = weights.unsqueeze(-1) * E_valid.unsqueeze(0)
+        cell_genept_embed = weighted.sum(dim=1)
+
+        return cell_genept_embed
+
 
     def _genept_topk_tokens(self, x, batch, gene_names, device="cuda"):
         if (not getattr(self, "_genept_cache_ready", False)) or \
@@ -168,16 +153,11 @@ class GNN(torch.nn.Module):
         mean_expr = global_mean_pool(x, batch) 
         mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
 
-        if self.number_genept_embeddings is None:
-            k_eff = mean_expr_valid.size(1) # Use all genept embeddings
-        else:  
-            k_eff = min(self.number_genept_embeddings, mean_expr_valid.size(1))
-
-        vals, idx_in_valid = torch.topk(mean_expr_valid, k=k_eff, dim=1)  # both [B, k_eff]
+        vals, idx_in_valid = torch.topk(mean_expr_valid, k=self.genept_embedding_dim, dim=1)  # both [B, k_eff]
         del vals
 
         flattened_idx = idx_in_valid.reshape(-1)
-        tokens = E_valid.index_select(0, flattened_idx).reshape(num_graphs, k_eff, -1)
+        tokens = E_valid.index_select(0, flattened_idx).reshape(num_graphs, self.genept_embedding_dim, -1)
         return tokens
 
     def _pool(self, x, batch):
@@ -191,37 +171,43 @@ class GNN(torch.nn.Module):
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
     def forward(self, x, edge_index, batch, inject=None, gene_names=None):
-        genept_tokens = None
-
-        if self._has_genept and (gene_names is not None):
-            genept_tokens = self._genept_topk_tokens(x, batch, gene_names, device=x.device)
-
         h = self.conv1(x, edge_index)
         h = F.relu(h)
-
         for i, conv in enumerate(self.convs):
-            if i == len(self.convs)-1:
-                h = conv(h, edge_index)
-            else:
-                h = F.relu(conv(h, edge_index))
+            h = conv(h, edge_index) if i == len(self.convs)-1 else F.relu(conv(h, edge_index))
+        pooled = self._pool(h, batch)   # [B, H]
+        B = int(batch.max().item()) + 1
 
-        pooled = self._pool(h, batch)
+        genept_tokens = None
+        if self._has_genept and (gene_names is not None):
+            if (not getattr(self, "_genept_cache_ready", False)) or \
+            (getattr(self, "_cached_gene_count", None) != len(gene_names)):
+                self._prepare_genept_lookup(gene_names, device=x.device)
+                self._cached_gene_count = len(gene_names)
+
+            E_valid = self._E_valid 
+            if E_valid.numel() == 0:
+                genept_tokens = x.new_zeros((B, 1, self.genept_embedding_dim))  # no overlap => dummy token
+            else:
+                genept_tokens = E_valid.unsqueeze(0).expand(B, -1, -1).to(x.device)  # [B, G_valid, D]
 
         if (genept_tokens is not None) and (self.xattn is not None):
-            tokens_h = self.genept_to_hidden(genept_tokens)
-            query = pooled.unsqueeze(1)
-            fused, _ = self.xattn(query, tokens_h, tokens_h)
-            fused_pooled = fused.squeeze(1)
-            
-            # Clear intermediate tensors to free memory
-            del genept_tokens, tokens_h, query, fused
+            tokens_h = self.genept_dropout(self.pre_attn_ln(self.genept_to_hidden(genept_tokens)))  # [B,G,H]
+            query    = self.q_proj(pooled).unsqueeze(1)   # [B,1,H]
+            keys     = self.k_proj(tokens_h)              # [B,G,H]
+            fused, _ = self.xattn(query, keys, tokens_h)  # [B,1,H]
+            fused_pooled = self.post_attn_ln(fused.squeeze(1))  # [B,H]
+
+            gate = torch.sigmoid(self.fuse_gate(pooled))        # [B,1]
+            fused_pooled = pooled + gate * (fused_pooled - pooled)  # gated residual
         else:
             fused_pooled = pooled
-        
+
         fused_pooled = F.dropout(fused_pooled, p=0.1, training=self.training)
         base_in = fused_pooled if inject is None else torch.cat([fused_pooled, inject], dim=1)
         out = self.lin_base(base_in)
         return out
+
 
 def bmc_loss(pred, target, noise_var):
     """Compute the Multidimensional Balanced MSE Loss (BMC) between `pred` and the ground truth `targets`.
@@ -344,8 +330,10 @@ def train(model, loader, criterion, optimizer, gene_names=None, inject=False, de
 
 def test(model, loader, loss, criterion, gene_names=None, inject=False, device="cuda"):
     model.eval()
-
     errors = []
+    all_preds = []
+    all_targets = []
+
     for batch in loader: 
         batch.to(device)
         
@@ -359,19 +347,27 @@ def test(model, loader, loss, criterion, gene_names=None, inject=False, device="
         }
         
         out = model(**forward_args)
+        target = batch.y.unsqueeze(1)
+
+        all_preds.append(out.detach().cpu().numpy())
+        all_targets.append(target.detach().cpu().numpy())
         
         if loss == "mse":
-            errors.append(F.mse_loss(out, batch.y.unsqueeze(1)).sqrt().item())
+            errors.append(F.mse_loss(out, target).sqrt().item())
         elif loss == "l1":
-            errors.append(F.l1_loss(out, batch.y.unsqueeze(1)).item())
+            errors.append(F.l1_loss(out, target).item())
         elif loss == "weightedl1":
-            errors.append(weighted_l1_loss(out, batch.y.unsqueeze(1), criterion.zero_weight, criterion.nonzero_weight).item())
+            errors.append(weighted_l1_loss(out, target, criterion.zero_weight, criterion.nonzero_weight).item())
         elif loss == "balanced_mse":
-            errors.append(bmc_loss(out, batch.y.unsqueeze(1), criterion.noise_sigma**2).item())
+            errors.append(bmc_loss(out, target, criterion.noise_sigma**2).item())
         elif loss == "npcc":
-            errors.append(npcc_loss(out, batch.y.unsqueeze(1)).item())
+            errors.append(npcc_loss(out, target).item())
 
-    return np.mean(errors)  # Derive ratio of correct predictions.
+    all_preds = np.concatenate(all_preds)
+    all_targets = np.concatenate(all_targets)
+    spearman = compute_spearman(all_preds, all_targets)
+
+    return np.mean(errors), spearman
 
 def predict(model, dataloader, adata, gene_names=None, device="cuda"):
     """
@@ -422,7 +418,7 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
             
             out = model(**forward_args)
             
-            batch_predictions = out.cpu().numpy()
+            batch_predictions = out.detach().cpu().numpy()
             
             for i, pred in enumerate(batch_predictions):
                 original_cell_idx = batch.original_cell_idx[i].item()

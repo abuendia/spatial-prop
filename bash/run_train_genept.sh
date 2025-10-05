@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(3) # 2 GPUs
+GPUS=(1)
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
 DATASETS=("aging_sagittal" "allen" "androvic" "exercise" "kukanja" "lohoff" "liverperturb" "pilot" "reprogramming" "zeng" "aging_coronal")
@@ -24,7 +24,6 @@ for dataset in "${DATASETS[@]}"; do
   {
     echo "[$(date +%T)] start $dataset on GPU $gpu"
 
-    # Run training script (logging is handled internally by the Python script)
     CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
       --dataset "$dataset" \
       --base_path "$BASE/data/raw" \
@@ -39,7 +38,7 @@ for dataset in "${DATASETS[@]}"; do
       --exp_name xattn \
       --do_eval \
       --genept_embeddings "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle" 
-
+    
     status=$?
     echo "$gpu" >&3      # return GPU token
     echo "[$(date +%T)] done  $dataset on GPU $gpu (exit $status)"
