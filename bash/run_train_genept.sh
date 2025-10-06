@@ -27,7 +27,7 @@ for dataset in "${DATASETS[@]}"; do
     CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
       --dataset "$dataset" \
       --base_path "$BASE/data/raw" \
-      --k_hop 2 \
+      --k_hop 3 \
       --augment_hop 2 \
       --center_celltypes all \
       --node_feature expression \
