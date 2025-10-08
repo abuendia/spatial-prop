@@ -2,10 +2,10 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(1)
+GPUS=(0)
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_model_expression.py
-DATASETS=("aging_sagittal" "allen" "androvic" "exercise" "kukanja" "lohoff" "liverperturb" "pilot" "reprogramming" "zeng" "aging_coronal")
+DATASETS=("zeng")
 # ----------------
 
 # FIFO as a GPU token pool
@@ -27,7 +27,7 @@ for dataset in "${DATASETS[@]}"; do
     CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
       --dataset "$dataset" \
       --base_path "$BASE/data/raw" \
-      --k_hop 3 \
+      --k_hop 2 \
       --augment_hop 2 \
       --center_celltypes all \
       --node_feature expression \

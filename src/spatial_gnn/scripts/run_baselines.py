@@ -129,15 +129,15 @@ def main():
     test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(all_train_data), len(all_test_data), flush=True)
     
-    save_dir = os.path.join("results/baselines_updated",train_dataset.processed_dir.split("/")[-2])
+    save_dir = os.path.join("baselines",train_dataset.processed_dir.split("/")[-2])
     os.makedirs(save_dir, exist_ok=True)
     
     print("Running k-hop baseline...", flush=True)
     eval_model(None, test_loader, save_dir, "khop_mean")
-    print("Running center cell type baseline...", flush=True)
-    eval_model(None, test_loader, save_dir, "khop_celltype_mean")
-    print("Running global baseline...", flush=True)
-    eval_model(train_loader, test_loader, save_dir, "global_mean")
+    # print("Running center cell type baseline...", flush=True)
+    # eval_model(None, test_loader, save_dir, "khop_celltype_mean")
+    #print("Running global baseline...", flush=True)
+    # eval_model(train_loader, test_loader, save_dir, "global_mean")
 
 
 def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"):
@@ -189,10 +189,10 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
             # get cell type
             celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
         
-    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds])
-    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals])
-    celltypes = np.array(celltypes)
-    
+    preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds]) # [num_cells, num_genes]
+    actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals]) # [num_cells, num_genes]
+    celltypes = np.array(celltypes) # [num_cells,]
+
     # drop genes that are missing everywhere
     preds = preds[:, actuals.max(axis=0)>=0]
     actuals = actuals[:, actuals.max(axis=0)>=0]
@@ -249,12 +249,71 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
                            columns=["Pearson","Spearman","R2","MAE", "RMSE"])
     df_cell.to_csv(os.path.join(save_dir, "test_evaluation_stats_cell.csv"), index=False)
     
+    # Calculate micro and macro averages
+    print("Computing micro and macro averages...", flush=True)
+    
+    # Micro averages: computed over all individual cell-gene pairs
+    # Flatten predictions and actuals to get all cell-gene pairs
+    preds_flat = preds.flatten()
+    actuals_flat = actuals.flatten()
+    
+    micro_r, _ = pearsonr(preds_flat, actuals_flat)
+    micro_s, _ = spearmanr(preds_flat, actuals_flat)
+    micro_r2 = r2_score(actuals_flat, preds_flat)
+    micro_mae = np.mean(np.abs(preds_flat - actuals_flat))
+    micro_rmse = np.sqrt(np.mean((preds_flat - actuals_flat)**2))
+    
+    # Macro averages: average of cell-type-specific averages
+    # Get cell type specific averages
+    celltype_means = {}
+    for ct in np.unique(celltypes):
+        ct_mask = celltypes == ct
+        if np.sum(ct_mask) > 0:
+            ct_preds = preds[ct_mask, :].flatten()
+            ct_actuals = actuals[ct_mask, :].flatten()
+            
+            if len(ct_preds) > 1:
+                ct_r, _ = pearsonr(ct_preds, ct_actuals)
+                ct_s, _ = spearmanr(ct_preds, ct_actuals)
+                ct_r2 = r2_score(ct_actuals, ct_preds)
+                ct_mae = np.mean(np.abs(ct_preds - ct_actuals))
+                ct_rmse = np.sqrt(np.mean((ct_preds - ct_actuals)**2))
+            else:
+                ct_r = ct_s = ct_r2 = ct_mae = ct_rmse = np.nan
+            
+            celltype_means[ct] = {
+                'pearson': ct_r,
+                'spearman': ct_s,
+                'r2': ct_r2,
+                'mae': ct_mae,
+                'rmse': ct_rmse
+            }
+    
+    # Calculate macro averages (average of cell type means)
+    macro_r = np.nanmean([stats['pearson'] for stats in celltype_means.values()])
+    macro_s = np.nanmean([stats['spearman'] for stats in celltype_means.values()])
+    macro_r2 = np.nanmean([stats['r2'] for stats in celltype_means.values()])
+    macro_mae = np.nanmean([stats['mae'] for stats in celltype_means.values()])
+    macro_rmse = np.nanmean([stats['rmse'] for stats in celltype_means.values()])
+    
+    # Create summary dataframe
+    summary_stats = pd.DataFrame({
+        'Metric': ['Pearson', 'Spearman', 'R2', 'MAE', 'RMSE'],
+        'Micro_Average': [micro_r, micro_s, micro_r2, micro_mae, micro_rmse],
+        'Macro_Average': [macro_r, macro_s, macro_r2, macro_mae, macro_rmse]
+    })
+    
+    # Save summary statistics
+    summary_stats.to_csv(os.path.join(save_dir, "test_evaluation_summary_micro_macro.csv"), index=False)
+    
     # print bulk results
     print("Finished bulk analysis:", flush=True)
     print("Cell:", flush=True)
     print(df_cell.median(axis=0), flush=True)
     print("Gene:", flush=True)
     print(df_gene.median(axis=0), flush=True)
+    print("\nMicro and Macro Averages:", flush=True)
+    print(summary_stats.to_string(index=False), flush=True)
     
     # stats broken down by cell type
     ct_stats_dict = {}

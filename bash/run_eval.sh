@@ -1,4 +1,4 @@
-dataset="aging_sagittal"
+dataset="zeng"
 
 CUDA_VISIBLE_DEVICES=0 python /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/scripts/model_performance.py \
     --dataset "$dataset" \

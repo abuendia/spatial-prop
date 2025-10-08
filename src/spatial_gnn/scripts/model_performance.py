@@ -148,7 +148,6 @@ def main():
             pool="add", 
             num_layers=k_hop,
             genept_embeddings=genept_embeddings,
-            number_genept_embeddings=args.number_genept_embeddings
         )
     else:
         model = GNN(
@@ -159,7 +158,6 @@ def main():
             pool="add", 
             num_layers=k_hop,
             genept_embeddings=genept_embeddings,
-            number_genept_embeddings=args.number_genept_embeddings
         )
 
     print(f"Model initialized on {device}")
