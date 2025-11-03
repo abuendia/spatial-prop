@@ -42,7 +42,8 @@ def train_model_from_scratch(
     stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
     model_save_dir: Optional[str] = None,
-    genept_lr_multiplier: float = 2.0
+    genept_strategy: Optional[str] = None,
+    predict_celltype: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -95,6 +96,8 @@ def train_model_from_scratch(
         Column name in adata.obs to stratify the split by (only used in AnnData mode)
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
+    num_cell_types : Optional[int], default=None
+        Number of cell types to predict
     Returns
     -------
     Tuple[GNN, str]
@@ -163,7 +166,11 @@ def train_model_from_scratch(
         overwrite=False,
         use_mp=False,
     )
-    
+
+    if predict_celltype:
+        num_cell_types = len(celltypes_to_index)
+    else:
+        num_cell_types = None
     # Process datasets
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
@@ -215,6 +222,9 @@ def train_model_from_scratch(
                 pool="add", 
                 num_layers=k_hop,
                 genept_embeddings=genept_embeddings,
+                genept_strategy=genept_strategy,
+                predict_celltype=predict_celltype,
+                num_cell_types=num_cell_types
             )
         else:
             model = GNN(
@@ -225,6 +235,9 @@ def train_model_from_scratch(
                 pool="add", 
                 num_layers=k_hop,
                 genept_embeddings=genept_embeddings,
+                genept_strategy=genept_strategy,
+                predict_celltype=predict_celltype,
+                num_cell_types=num_cell_types
             )
     else:
         print("Initializing baseline model without GenePT embeddings...", flush=True)
@@ -237,6 +250,8 @@ def train_model_from_scratch(
                 method="GIN", 
                 pool="add", 
                 num_layers=k_hop,
+                predict_celltype=predict_celltype,
+                num_cell_types=num_cell_types
             )
         else:
             model = GNN(
@@ -246,6 +261,8 @@ def train_model_from_scratch(
                 method="GIN", 
                 pool="add", 
                 num_layers=k_hop,
+                predict_celltype=predict_celltype,
+                num_cell_types=num_cell_types
             )
     
     model.to(device)
@@ -332,7 +349,9 @@ def train_model_from_scratch(
         "celltypes_to_index": celltypes_to_index,
         "num_cells_per_ct_id": num_cells_per_ct_id,
         "genept_embeddings": use_genept,
-        "genept_lr_multiplier": genept_lr_multiplier if use_genept else None
+        "genept_strategy": genept_strategy,
+        "predict_celltype": predict_celltype,
+        "num_cell_types": num_cell_types
     }
     
     config_path = os.path.join(model_save_dir, "config.json")
@@ -375,8 +394,10 @@ def main():
     parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
     parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
-    parser.add_argument("--genept_lr_multiplier", help="Learning rate multiplier for GenePT head", type=float, default=2.0)
-        
+    parser.add_argument("--genept_strategy", help="Strategy to use for GenePT embeddings", type=str, default=None) # early_fusion, late_fusion, xattn
+    parser.add_argument("--log_to_terminal", action='store_true', help="Log to terminal in addition to file")
+    parser.add_argument("--predict_celltype", action='store_true', help="Predict cell type instead of expression")
+
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility when using AnnData (default: 42)")
@@ -415,8 +436,11 @@ def main():
     os.makedirs(model_save_dir, exist_ok=True)
     
     # Set up logging
-    log_file = setup_logging_to_file(os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name)) 
-    print(f"Log file: {os.getcwd()}/{log_file}", file=sys.__stdout__)
+    if args.log_to_terminal:
+        print(f"Logging to terminal in addition to file", flush=True)
+    else:
+        print(f"Logging to file only", flush=True)
+        log_file = setup_logging_to_file(os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name)) 
 
     test_loader, gene_names, (model, model_config, _) = train_model_from_scratch(
         k_hop=args.k_hop,
@@ -442,7 +466,8 @@ def main():
         stratify_by=args.stratify_by,
         genept_embeddings=args.genept_embeddings,
         model_save_dir=model_save_dir,
-        genept_lr_multiplier=args.genept_lr_multiplier
+        genept_strategy=args.genept_strategy, 
+        predict_celltype=args.predict_celltype
     )
 
     if args.do_eval:

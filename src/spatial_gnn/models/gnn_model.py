@@ -24,6 +24,9 @@ class GNN(torch.nn.Module):
         method="GCN",
         pool="add",
         genept_embeddings=None,
+        genept_strategy=None,
+        predict_celltype=False,
+        num_cell_types=None
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -31,23 +34,49 @@ class GNN(torch.nn.Module):
         self.method = method
         self.pool = pool
         self.inject_dim = inject_dim
+        self.predict_celltype = predict_celltype
+        self.num_cell_types = num_cell_types
 
+        self.has_genept = genept_embeddings is not None
         self.genept_embeddings = genept_embeddings
         self.genept_embedding_dim = 0
         self._genept_cache_ready = False
-        self._cached_gene_count = None
-        self._has_genept = genept_embeddings is not None
-        readout_dim = 128
+        self.genept_strategy = genept_strategy
 
         # Set embedding dimension if GenePT embeddings are provided
         if self.genept_embeddings is not None:
             self.genept_embedding_dim = len(next(iter(self.genept_embeddings.values())))
             print(f"Using {len(self.genept_embeddings)} GenePT embeddings with dimension {self.genept_embedding_dim}")
-        
+
+        if self.genept_strategy == "early_fusion":
+            input_dim = input_dim + self.genept_embedding_dim
+            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+        elif self.genept_strategy == "late_fusion":
+            self.lin_base = Linear(hidden_channels + inject_dim + self.genept_embedding_dim, output_dim)
+        elif self.genept_strategy == "xattn":
+            # cross-attention
+            self.q_proj = Linear(hidden_channels, hidden_channels)
+            self.k_proj = Linear(hidden_channels, hidden_channels)
+            self.genept_to_hidden = Linear(self.genept_embedding_dim, hidden_channels)
+            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=8, batch_first=True)
+
+            self.pre_attn_ln = LayerNorm(hidden_channels)
+            self.post_attn_ln = LayerNorm(hidden_channels)
+
+            self.genept_dropout = Dropout(0.15)
+            self.fuse_gate = Sequential(
+                Linear(hidden_channels, hidden_channels),
+                ReLU(),
+                Linear(hidden_channels, 1)
+            )
+            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+        else:
+            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+
+        # Expression branch GNN
         if self.method == "GCN":
             self.conv1 = GCNConv(input_dim, hidden_channels)
             self.convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
-        
         elif self.method == "GIN":
             self.conv1 = GINConv(
                             Sequential(
@@ -65,100 +94,87 @@ class GNN(torch.nn.Module):
                                 Linear(hidden_channels, hidden_channels)
                             )
                           ) for _ in range(num_layers - 1)])
-        
         elif self.method == "SAGE":
             self.conv1 = SAGEConv(input_dim, hidden_channels)
             self.convs = ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
-            
         else:
             raise Exception("'method' not recognized.")
-        
-        self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
 
-        if self._has_genept:
-            # cross-attention
-            self.q_proj = Linear(hidden_channels, hidden_channels)
-            self.k_proj = Linear(hidden_channels, hidden_channels)
-            self.genept_to_hidden = Linear(self.genept_embedding_dim, hidden_channels)
-            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=8, batch_first=True)
+        # Cell-type branch GNN (only if predicting cell type)
+        if self.predict_celltype:
+            if self.num_cell_types is None:
+                raise ValueError("num_cell_types must be provided when predict_celltype=True")
 
-            self.pre_attn_ln = LayerNorm(hidden_channels)
-            self.post_attn_ln = LayerNorm(hidden_channels)
+            if self.method == "GCN":
+                self.ct_conv1 = GCNConv(input_dim, hidden_channels)
+                self.ct_convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
+            elif self.method == "GIN":
+                self.ct_conv1 = GINConv(
+                                Sequential(
+                                    Linear(input_dim, hidden_channels),
+                                    BatchNorm1d(hidden_channels),
+                                    ReLU(),
+                                    Linear(hidden_channels, hidden_channels)
+                                )
+                              )
+                self.ct_convs = ModuleList([GINConv(
+                                Sequential(
+                                    Linear(hidden_channels, hidden_channels),
+                                    BatchNorm1d(hidden_channels),
+                                    ReLU(),
+                                    Linear(hidden_channels, hidden_channels)
+                                )
+                              ) for _ in range(num_layers - 1)])
+            elif self.method == "SAGE":
+                self.ct_conv1 = SAGEConv(input_dim, hidden_channels)
+                self.ct_convs = ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
 
-            self.genept_dropout = Dropout(0.15)
-            self.fuse_gate = Sequential(
-                Linear(hidden_channels, hidden_channels),
+            # Cell-type classifier head
+            self.celltype_head = Linear(hidden_channels, self.num_cell_types)
+
+            # Expression MLP head that consumes pooled expr features (+ optional inject) + one-hot cell type
+            expr_head_in_dim = hidden_channels + inject_dim + self.num_cell_types
+            self.expr_mlp = Sequential(
+                Linear(expr_head_in_dim, hidden_channels),
                 ReLU(),
-                Linear(hidden_channels, 1)
+                Linear(hidden_channels, output_dim)
             )
+
 
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
         # Map genes -> row in embedding matrix
-        valid_rows, valid_idx = [], []
-        for j, gene_name in enumerate(gene_names):
-            emb = self.genept_embeddings.get(gene_name)
-            if emb is not None:
-                valid_rows.append(torch.as_tensor(emb, dtype=torch.float32))
-                valid_idx.append(j)
+        emb_list = []
+        valid_idx_set = set()
 
-        if len(valid_rows) == 0:
-            # No overlaps; store empty tensors
-            self.register_buffer("_E_valid", torch.zeros(0, self.genept_embedding_dim))
-            self.register_buffer("_valid_idx", torch.zeros(0, dtype=torch.long))
-        else:
-            E_valid = torch.stack(valid_rows, dim=0)             # [G_valid, D]
-            valid_idx = torch.tensor(valid_idx, dtype=torch.long) # [G_valid]
-            self.register_buffer("_E_valid", E_valid.to(device))
-            self.register_buffer("_valid_idx", valid_idx.to(device))
+        for i, gene_name in enumerate(gene_names):
+            if gene_name in self.genept_embeddings:
+                emb_list.append(self.genept_embeddings[gene_name])
+                valid_idx_set.add(i)
+            else:
+                emb_list.append(torch.zeros(self.genept_embedding_dim))
 
-        print("GenePT overlap: ", len(valid_rows), "/", len(gene_names))
+        emb_matrix = torch.tensor(emb_list)
+        mean_emb = emb_matrix[list(valid_idx_set)].mean(dim=0)  # only compute mean on real genes
+        for i in range(len(emb_matrix)):
+            if i not in valid_idx_set:
+                emb_matrix[i] = mean_emb
+   
+        emb_matrix = emb_matrix.to(device)
+        print(f"GenePT overlap: {len(valid_idx_set)}/{len(gene_names)}")
+        self._E_valid = emb_matrix
+        self._valid_idx_set = valid_idx_set
         self._genept_cache_ready = True
 
-    def _compute_genept_weighted_embedding(self, x, batch, gene_names, device=None):
-        if (not self._genept_cache_ready) or (getattr(self, "_cached_gene_count", None) != len(gene_names)):
+        return emb_matrix
+
+
+    def _compute_genept_weighted_embedding(self, x, gene_names, device=None):
+        if not self._genept_cache_ready:
             self._prepare_genept_lookup(gene_names, device)
-            self._cached_gene_count = len(gene_names)
-        
-        E_valid = self._E_valid  # [valid_genes, D]
-        valid_idx = self._valid_idx  # [valid_genes]
-        B = int(batch.max().item()) + 1
-
-        if E_valid.numel() == 0:
-            return x.new_zeros((B, 1, self.genept_embedding_dim))
-        
-        mean_expr = global_mean_pool(x, batch)
-        expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
-        
-        weights = expr_valid / (expr_valid.sum(dim=1, keepdim=True) + 1e-12)
-        weighted = weights.unsqueeze(-1) * E_valid.unsqueeze(0)
-        cell_genept_embed = weighted.sum(dim=1)
-
+         
+        cell_genept_embed = x @ self._E_valid
+        cell_genept_embed = cell_genept_embed / (torch.linalg.norm(cell_genept_embed, axis=1, keepdim=True) + 1e-12)
         return cell_genept_embed
-
-
-    def _genept_topk_tokens(self, x, batch, gene_names, device="cuda"):
-        if (not getattr(self, "_genept_cache_ready", False)) or \
-        (getattr(self, "_cached_gene_count", None) != len(gene_names)):
-            self._prepare_genept_lookup(gene_names, device)
-            self._cached_gene_count = len(gene_names)
-        
-        E_valid = self._E_valid  # [valid_genes, D]
-        valid_idx = self._valid_idx  # [valid_genes]
-        num_graphs = int(batch.max().item()) + 1
-
-        if E_valid.numel() == 0:
-            # No overlap between gene_names and genept embeddings
-            return x.new_zeros((num_graphs, 1, self.genept_embedding_dim))
-        
-        mean_expr = global_mean_pool(x, batch) 
-        mean_expr_valid = mean_expr.index_select(dim=1, index=valid_idx)
-
-        vals, idx_in_valid = torch.topk(mean_expr_valid, k=self.genept_embedding_dim, dim=1)  # both [B, k_eff]
-        del vals
-
-        flattened_idx = idx_in_valid.reshape(-1)
-        tokens = E_valid.index_select(0, flattened_idx).reshape(num_graphs, self.genept_embedding_dim, -1)
-        return tokens
 
     def _pool(self, x, batch):
         if self.pool == "mean":
@@ -171,42 +187,55 @@ class GNN(torch.nn.Module):
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
     def forward(self, x, edge_index, batch, inject=None, gene_names=None):
-        h = self.conv1(x, edge_index)
+        # Optionally augment node features with GenePT (early fusion)
+        if self.genept_strategy == "early_fusion":
+            weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
+            x_with_genept = torch.cat([x, weighted_genept_embeddings], dim=1)
+        else:
+            x_with_genept = x
+
+        # Expression branch forward
+        h = self.conv1(x_with_genept, edge_index)
         h = F.relu(h)
         for i, conv in enumerate(self.convs):
             h = conv(h, edge_index) if i == len(self.convs)-1 else F.relu(conv(h, edge_index))
-        pooled = self._pool(h, batch)   # [B, H]
-        B = int(batch.max().item()) + 1
+        if self.genept_strategy == "late_fusion":
+            weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
+            h = torch.cat([h, weighted_genept_embeddings], dim=1)
+        expr_pooled = self._pool(h, batch)   # [B, H]
+        expr_pooled = F.dropout(expr_pooled, p=0.1, training=self.training)
 
-        genept_tokens = None
-        if self._has_genept and (gene_names is not None):
-            if (not getattr(self, "_genept_cache_ready", False)) or \
-            (getattr(self, "_cached_gene_count", None) != len(gene_names)):
-                self._prepare_genept_lookup(gene_names, device=x.device)
-                self._cached_gene_count = len(gene_names)
+        if not self.predict_celltype:
+            base_in = expr_pooled if inject is None else torch.cat([expr_pooled, inject], dim=1)
+            out = self.lin_base(base_in)
+            return out
 
-            E_valid = self._E_valid 
-            if E_valid.numel() == 0:
-                genept_tokens = x.new_zeros((B, 1, self.genept_embedding_dim))  # no overlap => dummy token
-            else:
-                genept_tokens = E_valid.unsqueeze(0).expand(B, -1, -1).to(x.device)  # [B, G_valid, D]
+        # Cell-type branch forward (separate GNN)
+        ct_h = self.ct_conv1(x_with_genept, edge_index)
+        ct_h = F.relu(ct_h)
+        for i, conv in enumerate(self.ct_convs):
+            ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
+        ct_pooled = self._pool(ct_h, batch)   # [B, H]
+        ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
 
-        if (genept_tokens is not None) and (self.xattn is not None):
-            tokens_h = self.genept_dropout(self.pre_attn_ln(self.genept_to_hidden(genept_tokens)))  # [B,G,H]
-            query    = self.q_proj(pooled).unsqueeze(1)   # [B,1,H]
-            keys     = self.k_proj(tokens_h)              # [B,G,H]
-            fused, _ = self.xattn(query, keys, tokens_h)  # [B,1,H]
-            fused_pooled = self.post_attn_ln(fused.squeeze(1))  # [B,H]
+        # Cell-type logits and one-hot prediction (stop gradients into classifier from MLP path)
+        celltype_logits = self.celltype_head(ct_pooled)
+        with torch.no_grad():
+            pred_indices = torch.argmax(celltype_logits, dim=1)
+            one_hot_pred = F.one_hot(pred_indices, num_classes=self.num_cell_types).float()
 
-            gate = torch.sigmoid(self.fuse_gate(pooled))        # [B,1]
-            fused_pooled = pooled + gate * (fused_pooled - pooled)  # gated residual
-        else:
-            fused_pooled = pooled
+        # Late fusion with predicted one-hot cell type and optional inject
+        fused_features = torch.cat([
+            expr_pooled,
+            one_hot_pred.to(expr_pooled.device)
+        ], dim=1)
+        if inject is not None:
+            fused_features = torch.cat([fused_features, inject], dim=1)
 
-        fused_pooled = F.dropout(fused_pooled, p=0.1, training=self.training)
-        base_in = fused_pooled if inject is None else torch.cat([fused_pooled, inject], dim=1)
-        out = self.lin_base(base_in)
-        return out
+        # Final expression prediction via MLP
+        expr_out = self.expr_mlp(fused_features)
+
+        return expr_out, celltype_logits
 
 
 def bmc_loss(pred, target, noise_var):
@@ -318,8 +347,7 @@ def train(model, loader, criterion, optimizer, gene_names=None, inject=False, de
             'gene_names': gene_names,
         }
         
-        out = model(**forward_args)  # Perform a single forward pass.
-        
+        out = model(**forward_args)  # Perform a single forward pass.        
         loss = criterion(out, batch.y)  # Compute the loss.
                 
         loss.backward()  # Derive gradients.
