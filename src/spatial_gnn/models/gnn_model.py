@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
 from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 
-from spatial_gnn.utils.metric_utils import compute_spearman
+from spatial_gnn.utils.metric_utils import compute_spearman, compute_celltype_accuracy
 
 
 class GNN(torch.nn.Module):
@@ -25,8 +25,9 @@ class GNN(torch.nn.Module):
         pool="add",
         genept_embeddings=None,
         genept_strategy=None,
+        celltypes_to_index=None,
         predict_celltype=False,
-        num_cell_types=None
+        train_multitask=False,
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -35,7 +36,9 @@ class GNN(torch.nn.Module):
         self.pool = pool
         self.inject_dim = inject_dim
         self.predict_celltype = predict_celltype
-        self.num_cell_types = num_cell_types
+        self.train_multitask = train_multitask
+        self.celltypes_to_index = celltypes_to_index
+        self.num_celltypes = len(celltypes_to_index)
 
         self.has_genept = genept_embeddings is not None
         self.genept_embeddings = genept_embeddings
@@ -102,9 +105,6 @@ class GNN(torch.nn.Module):
 
         # Cell-type branch GNN (only if predicting cell type)
         if self.predict_celltype:
-            if self.num_cell_types is None:
-                raise ValueError("num_cell_types must be provided when predict_celltype=True")
-
             if self.method == "GCN":
                 self.ct_conv1 = GCNConv(input_dim, hidden_channels)
                 self.ct_convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
@@ -130,10 +130,10 @@ class GNN(torch.nn.Module):
                 self.ct_convs = ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
 
             # Cell-type classifier head
-            self.celltype_head = Linear(hidden_channels, self.num_cell_types)
+            self.celltype_head = Linear(hidden_channels, self.num_celltypes)
 
             # Expression MLP head that consumes pooled expr features (+ optional inject) + one-hot cell type
-            expr_head_in_dim = hidden_channels + inject_dim + self.num_cell_types
+            expr_head_in_dim = hidden_channels + inject_dim + self.num_celltypes
             self.expr_mlp = Sequential(
                 Linear(expr_head_in_dim, hidden_channels),
                 ReLU(),
@@ -186,7 +186,16 @@ class GNN(torch.nn.Module):
         else:
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
-    def forward(self, x, edge_index, batch, inject=None, gene_names=None):
+    def forward(
+        self, 
+        x, 
+        edge_index, 
+        batch, 
+        inject=None, 
+        gene_names=None, 
+        use_oracle_ct=False,
+        center_celltype=None
+    ):
         # Optionally augment node features with GenePT (early fusion)
         if self.genept_strategy == "early_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
@@ -209,33 +218,33 @@ class GNN(torch.nn.Module):
             base_in = expr_pooled if inject is None else torch.cat([expr_pooled, inject], dim=1)
             out = self.lin_base(base_in)
             return out
+        else:
+            # Cell-type branch forward (separate GNN)
+            ct_h = self.ct_conv1(x_with_genept, edge_index)
+            ct_h = F.relu(ct_h)
+            for i, conv in enumerate(self.ct_convs):
+                ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
+            ct_pooled = self._pool(ct_h, batch)   # [B, H]
+            ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
+            celltype_logits = self.celltype_head(ct_pooled)
 
-        # Cell-type branch forward (separate GNN)
-        ct_h = self.ct_conv1(x_with_genept, edge_index)
-        ct_h = F.relu(ct_h)
-        for i, conv in enumerate(self.ct_convs):
-            ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
-        ct_pooled = self._pool(ct_h, batch)   # [B, H]
-        ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
+            if use_oracle_ct:
+                celltype_features = F.one_hot(torch.tensor(center_celltype, device=celltype_logits.device), num_classes=self.num_celltypes).float().detach()
+            else:
+                if self.train_multitask:
+                    celltype_features = F.softmax(celltype_logits, dim=1)
+                else:
+                    hard_ct_pred = torch.argmax(celltype_logits, dim=1)
+                    celltype_features = F.one_hot(hard_ct_pred, num_classes=self.num_celltypes).float().detach()
 
-        # Cell-type logits and one-hot prediction (stop gradients into classifier from MLP path)
-        celltype_logits = self.celltype_head(ct_pooled)
-        with torch.no_grad():
-            pred_indices = torch.argmax(celltype_logits, dim=1)
-            one_hot_pred = F.one_hot(pred_indices, num_classes=self.num_cell_types).float()
+            # Late fusion with predicted cell type and optional inject
+            fused_features = torch.cat([expr_pooled, celltype_features], dim=1)
+            if inject is not None:
+                fused_features = torch.cat([fused_features, inject], dim=1)
 
-        # Late fusion with predicted one-hot cell type and optional inject
-        fused_features = torch.cat([
-            expr_pooled,
-            one_hot_pred.to(expr_pooled.device)
-        ], dim=1)
-        if inject is not None:
-            fused_features = torch.cat([fused_features, inject], dim=1)
-
-        # Final expression prediction via MLP
-        expr_out = self.expr_mlp(fused_features)
-
-        return expr_out, celltype_logits
+            # Final expression prediction via MLP
+            expr_out = self.expr_mlp(fused_features)
+            return expr_out, celltype_logits
 
 
 def bmc_loss(pred, target, noise_var):
@@ -332,39 +341,149 @@ class WeightedL1Loss(_Loss):
         return loss
 
 
-def train(model, loader, criterion, optimizer, gene_names=None, inject=False, device="cuda"):
-    model.train()
-
-    for batch in loader:  
-        batch.to(device)
-        
-        # Prepare arguments for forward pass
-        forward_args = {
-            'x': batch.x,
-            'edge_index': batch.edge_index, 
-            'batch': batch.batch,
-            'inject': batch.inject if inject else None,
-            'gene_names': gene_names,
-        }
-        
-        out = model(**forward_args)  # Perform a single forward pass.        
-        loss = criterion(out, batch.y)  # Compute the loss.
-                
-        loss.backward()  # Derive gradients.
-        optimizer.step()  # Update parameters based on gradients.
-        optimizer.zero_grad()  # Clear gradients.
-
+def _get_celltype_params(model):
+    """
+    Get celltype network parameters and their IDs.
     
+    Returns:
+        tuple: (list of parameters, set of parameter IDs)
+    """
+    celltype_params = []
+    if hasattr(model, 'ct_conv1'):
+        celltype_params.extend(list(model.ct_conv1.parameters()))
+    if hasattr(model, 'ct_convs'):
+        for conv in model.ct_convs:
+            celltype_params.extend(list(conv.parameters()))
+    if hasattr(model, 'celltype_head'):
+        celltype_params.extend(list(model.celltype_head.parameters()))
+    celltype_param_ids = {id(p) for p in celltype_params}
+    return celltype_params, celltype_param_ids
 
-def test(model, loader, loss, criterion, gene_names=None, inject=False, device="cuda"):
+
+def _get_expression_params(model):
+    """
+    Get expression network parameters and their IDs.
+    
+    Returns:
+        tuple: (list of parameters, set of parameter IDs)
+    """
+    expr_params = []
+    if hasattr(model, 'conv1'):
+        expr_params.extend(list(model.conv1.parameters()))
+    if hasattr(model, 'convs'):
+        for conv in model.convs:
+            expr_params.extend(list(conv.parameters()))
+    if hasattr(model, 'expr_mlp'):
+        expr_params.extend(list(model.expr_mlp.parameters()))
+    elif hasattr(model, 'lin_base'):
+        expr_params.extend(list(model.lin_base.parameters()))
+    # Also include GenePT-related parameters if they exist
+    for attr_name in ['q_proj', 'k_proj', 'genept_to_hidden', 'xattn', 'pre_attn_ln', 'post_attn_ln', 'fuse_gate']:
+        if hasattr(model, attr_name):
+            expr_params.extend(list(getattr(model, attr_name).parameters()))
+    expr_param_ids = {id(p) for p in expr_params}
+    return expr_params, expr_param_ids
+
+
+def train(
+    model,
+    loader,
+    criterion, 
+    expr_optimizer, 
+    ct_optimizer=None, 
+    gene_names=None, 
+    inject=False, 
+    device="cuda", 
+    celltype_weight=1.0
+):
+    model.train()
+    for batch in loader:
+        batch.to(device)
+
+        center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
+
+        # Multitask: Use expr_optimizer for both expression and celltype prediction
+        if model.predict_celltype and model.train_multitask:
+            expr_optimizer.zero_grad(set_to_none=True)
+            center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
+            expr_out, celltype_features = model(
+                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
+                inject=(batch.inject if inject else None), gene_names=gene_names, 
+                use_oracle_ct=True,
+                center_celltype=center_celltypes,
+            )
+            expr_loss = criterion(expr_out, batch.y)
+            ct_loss = F.cross_entropy(celltype_features, center_ct)
+            (expr_loss + celltype_weight * ct_loss).backward()
+            expr_optimizer.step()
+            continue
+
+        # Two-step training: Use expr_optimizer for expression prediction and ct_optimizer for celltype prediction
+        if model.predict_celltype and not model.train_multitask:
+            # Step 1: celltype-only
+            for p in ct_optimizer.param_groups[0]['params']: p.requires_grad_(True)
+            for p in expr_optimizer.param_groups[0]['params']: p.requires_grad_(False)
+
+            ct_optimizer.zero_grad(set_to_none=True)
+            center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
+            _, celltype_features = model(
+                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
+                inject=(batch.inject if inject else None), gene_names=gene_names, 
+                use_oracle_ct=True,
+                center_celltype=center_celltypes,
+            )
+            ct_loss = F.cross_entropy(celltype_features, center_ct)
+            ct_loss.backward()
+            ct_optimizer.step()
+
+            # Step 2: expression-only
+            for p in ct_optimizer.param_groups[0]['params']: p.requires_grad_(False)
+            for p in expr_optimizer.param_groups[0]['params']: p.requires_grad_(True)
+
+            expr_optimizer.zero_grad(set_to_none=True)
+            expr_out, _ = model(
+                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
+                inject=(batch.inject if inject else None), gene_names=gene_names,
+                use_oracle_ct=True,
+                center_celltype=center_celltypes,
+            )
+            expr_loss = criterion(expr_out, batch.y)
+            expr_loss.backward()
+            expr_optimizer.step()
+
+            # Reenable for next iter
+            for p in ct_optimizer.param_groups[0]['params'] + expr_optimizer.param_groups[0]['params']:
+                p.requires_grad_(True)
+        else:
+            # Single-task expression prediction
+            expr_optimizer.zero_grad(set_to_none=True)
+            out = model(x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
+                        inject=(batch.inject if inject else None), gene_names=gene_names)
+            loss = criterion(out, batch.y)
+            loss.backward()
+            expr_optimizer.step()
+
+def test(
+    model, 
+    loader, 
+    loss, 
+    criterion, 
+    gene_names=None, 
+    inject=False, 
+    device="cuda",
+):
     model.eval()
     errors = []
     all_preds = []
     all_targets = []
 
+    all_ct_preds = []
+    all_ct_targets = []
+
     for batch in loader: 
         batch.to(device)
         
+        center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
         # Prepare arguments for forward pass
         forward_args = {
             'x': batch.x,
@@ -372,9 +491,20 @@ def test(model, loader, loss, criterion, gene_names=None, inject=False, device="
             'batch': batch.batch,
             'inject': batch.inject if inject else None,
             'gene_names': gene_names,
+            'use_oracle_ct': True,
+            'center_celltype': center_celltypes,
         }
         
-        out = model(**forward_args)
+        forward_output = model(**forward_args)
+        
+        # Handle both single-task and multi-task outputs
+        if model.predict_celltype:
+            out, celltype_logits = forward_output  # Unpack tuple
+            all_ct_preds.append(celltype_logits)
+            all_ct_targets.append(center_celltypes)
+        else:
+            out = forward_output
+        
         target = batch.y.unsqueeze(1)
 
         all_preds.append(out.detach().cpu().numpy())
@@ -393,9 +523,13 @@ def test(model, loader, loss, criterion, gene_names=None, inject=False, device="
 
     all_preds = np.concatenate(all_preds)
     all_targets = np.concatenate(all_targets)
-    spearman = compute_spearman(all_preds, all_targets)
+    all_ct_preds = torch.cat(all_ct_preds, dim=0)
+    all_ct_targets = np.concatenate(all_ct_targets)
 
-    return np.mean(errors), spearman
+    spearman = compute_spearman(all_preds, all_targets)
+    celltype_accuracy = compute_celltype_accuracy(all_ct_preds, all_ct_targets)
+
+    return np.mean(errors), spearman, celltype_accuracy
 
 def predict(model, dataloader, adata, gene_names=None, device="cuda"):
     """
@@ -444,7 +578,13 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
                 'gene_names': gene_names,
             }
             
-            out = model(**forward_args)
+            forward_output = model(**forward_args)
+            
+            # Handle both single-task and multi-task outputs
+            if model.predict_celltype:
+                out, _ = forward_output  # Unpack tuple, use expression output for prediction
+            else:
+                out = forward_output
             
             batch_predictions = out.detach().cpu().numpy()
             

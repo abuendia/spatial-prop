@@ -223,6 +223,9 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
             out = model(data.x, data.edge_index, data.batch, None, gene_names) 
         else:
             out = model(data.x, data.edge_index, data.batch, data.inject, gene_names)
+
+        if model.predict_celltype:
+            out, _ = out  # Unpack tuple, use expression output for prediction
         
         # Move to CPU immediately to free GPU memory
         preds.append(out.detach().cpu())

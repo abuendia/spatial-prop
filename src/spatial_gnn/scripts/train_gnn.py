@@ -39,11 +39,10 @@ def train_model_from_scratch(
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     test_size: float = 0.2,
     random_state: int = 42,
+    model_save_dir: Optional[str] = None,
     stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
-    model_save_dir: Optional[str] = None,
     genept_strategy: Optional[str] = None,
-    predict_celltype: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -96,14 +95,15 @@ def train_model_from_scratch(
         Column name in adata.obs to stratify the split by (only used in AnnData mode)
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
-    num_cell_types : Optional[int], default=None
-        Number of cell types to predict
+    genept_strategy : Optional[str], default=None
+        Strategy to use for GenePT embeddings
     Returns
     -------
     Tuple[GNN, str]
         - Trained model
         - Path to saved model
     """
+    # Split data if not present in config
     if adata_path is not None:    
         adata = sc.read_h5ad(adata_path)  
         train_ids, test_ids = split_anndata_train_test(
@@ -167,10 +167,6 @@ def train_model_from_scratch(
         use_mp=False,
     )
 
-    if predict_celltype:
-        num_cell_types = len(celltypes_to_index)
-    else:
-        num_cell_types = None
     # Process datasets
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
@@ -209,67 +205,22 @@ def train_model_from_scratch(
     use_genept = genept_embeddings is not None
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
 
-    # Initialize model - create GenePT-enabled model if embeddings are provided
-    if use_genept:
-        print("Initializing model with GenePT embeddings for joint training...", flush=True)
-        if inject is True:
-            model = GNN(
-                hidden_channels=64,
-                input_dim=int(train_dataset.get(0).x.shape[1]),
-                output_dim=len(train_dataset.get(0).y),
-                inject_dim=int(train_dataset.get(0).inject.shape[1]),
-                method="GIN", 
-                pool="add", 
-                num_layers=k_hop,
-                genept_embeddings=genept_embeddings,
-                genept_strategy=genept_strategy,
-                predict_celltype=predict_celltype,
-                num_cell_types=num_cell_types
-            )
-        else:
-            model = GNN(
-                hidden_channels=64,
-                input_dim=int(train_dataset.get(0).x.shape[1]),
-                output_dim=len(train_dataset.get(0).y),
-                method="GIN", 
-                pool="add", 
-                num_layers=k_hop,
-                genept_embeddings=genept_embeddings,
-                genept_strategy=genept_strategy,
-                predict_celltype=predict_celltype,
-                num_cell_types=num_cell_types
-            )
-    else:
-        print("Initializing baseline model without GenePT embeddings...", flush=True)
-        if inject is True:
-            model = GNN(
-                hidden_channels=64,
-                input_dim=int(train_dataset.get(0).x.shape[1]),
-                output_dim=len(train_dataset.get(0).y),
-                inject_dim=int(train_dataset.get(0).inject.shape[1]),
-                method="GIN", 
-                pool="add", 
-                num_layers=k_hop,
-                predict_celltype=predict_celltype,
-                num_cell_types=num_cell_types
-            )
-        else:
-            model = GNN(
-                hidden_channels=64,
-                input_dim=int(train_dataset.get(0).x.shape[1]),
-                output_dim=len(train_dataset.get(0).y),
-                method="GIN", 
-                pool="add", 
-                num_layers=k_hop,
-                predict_celltype=predict_celltype,
-                num_cell_types=num_cell_types
-            )
-    
+    model = GNN(
+        hidden_channels=64,
+        input_dim=int(train_dataset.get(0).x.shape[1]),
+        output_dim=len(train_dataset.get(0).y),
+        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
+        method="GIN", 
+        pool="add", 
+        num_layers=k_hop,
+        genept_embeddings=genept_embeddings,
+        genept_strategy=genept_strategy,    
+    )
     model.to(device)
     print(f"Model initialized on {device}")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
+    
     # Setup loss function
     if loss == "mse":
         criterion = torch.nn.MSELoss()
@@ -350,8 +301,6 @@ def train_model_from_scratch(
         "num_cells_per_ct_id": num_cells_per_ct_id,
         "genept_embeddings": use_genept,
         "genept_strategy": genept_strategy,
-        "predict_celltype": predict_celltype,
-        "num_cell_types": num_cell_types
     }
     
     config_path = os.path.join(model_save_dir, "config.json")
@@ -396,7 +345,6 @@ def main():
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
     parser.add_argument("--genept_strategy", help="Strategy to use for GenePT embeddings", type=str, default=None) # early_fusion, late_fusion, xattn
     parser.add_argument("--log_to_terminal", action='store_true', help="Log to terminal in addition to file")
-    parser.add_argument("--predict_celltype", action='store_true', help="Predict cell type instead of expression")
 
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
@@ -439,7 +387,6 @@ def main():
     if args.log_to_terminal:
         print(f"Logging to terminal in addition to file", flush=True)
     else:
-        print(f"Logging to file only", flush=True)
         log_file = setup_logging_to_file(os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name)) 
 
     test_loader, gene_names, (model, model_config, _) = train_model_from_scratch(
@@ -467,7 +414,6 @@ def main():
         genept_embeddings=args.genept_embeddings,
         model_save_dir=model_save_dir,
         genept_strategy=args.genept_strategy, 
-        predict_celltype=args.predict_celltype
     )
 
     if args.do_eval:
