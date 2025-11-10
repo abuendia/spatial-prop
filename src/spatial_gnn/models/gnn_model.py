@@ -20,7 +20,7 @@ class GNN(torch.nn.Module):
         input_dim,
         output_dim=1,
         inject_dim=0,
-        num_layers=3,
+        num_layers=4,
         method="GCN",
         pool="add",
         genept_embeddings=None,
@@ -186,65 +186,119 @@ class GNN(torch.nn.Module):
         else:
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
-    def forward(
-        self, 
-        x, 
-        edge_index, 
-        batch, 
-        inject=None, 
-        gene_names=None, 
-        use_oracle_ct=False,
-        center_celltype=None
-    ):
+    def _forward_expr_backbone(self, x, edge_index, batch, gene_names=None):
         # Optionally augment node features with GenePT (early fusion)
         if self.genept_strategy == "early_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
-            x_with_genept = torch.cat([x, weighted_genept_embeddings], dim=1)
-        else:
-            x_with_genept = x
+            x = torch.cat([x, weighted_genept_embeddings], dim=1)
 
-        # Expression branch forward
-        h = self.conv1(x_with_genept, edge_index)
+        h = self.conv1(x, edge_index)
         h = F.relu(h)
         for i, conv in enumerate(self.convs):
             h = conv(h, edge_index) if i == len(self.convs)-1 else F.relu(conv(h, edge_index))
+
         if self.genept_strategy == "late_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
             h = torch.cat([h, weighted_genept_embeddings], dim=1)
-        expr_pooled = self._pool(h, batch)   # [B, H]
+
+        expr_pooled = self._pool(h, batch)
         expr_pooled = F.dropout(expr_pooled, p=0.1, training=self.training)
+        return expr_pooled
+
+    def forward_celltype(self, x, edge_index, batch):
+        """Return only cell-type logits (no expression)."""
+        assert self.predict_celltype, "Celltype branch not enabled"
+
+        ct_h = self.ct_conv1(x, edge_index)
+        ct_h = F.relu(ct_h)
+        for i, conv in enumerate(self.ct_convs):
+            ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
+
+        ct_pooled = self._pool(ct_h, batch)
+        ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
+        celltype_logits = self.celltype_head(ct_pooled)
+        return celltype_logits
+
+    def forward_expression(
+        self,
+        x,
+        edge_index,
+        batch,
+        inject=None,
+        gene_names=None,
+        center_celltype=None,
+        ct_logits=None,
+        use_oracle_ct=False,
+        allow_grad_through_ct=False,
+    ):
+        """Expression prediction, optionally conditioned on celltype logits."""
+        expr_pooled = self._forward_expr_backbone(x, edge_index, batch, gene_names=gene_names)
 
         if not self.predict_celltype:
             base_in = expr_pooled if inject is None else torch.cat([expr_pooled, inject], dim=1)
-            out = self.lin_base(base_in)
-            return out
+            return self.lin_base(base_in)
+
+        # With celltype prediction 
+        if use_oracle_ct:
+            # oracle one-hot
+            ct_idx = torch.tensor(center_celltype, device=expr_pooled.device, dtype=torch.long)
+            celltype_features = F.one_hot(ct_idx, num_classes=self.num_celltypes).float()
         else:
-            # Cell-type branch forward (separate GNN)
-            ct_h = self.ct_conv1(x_with_genept, edge_index)
-            ct_h = F.relu(ct_h)
-            for i, conv in enumerate(self.ct_convs):
-                ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
-            ct_pooled = self._pool(ct_h, batch)   # [B, H]
-            ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
-            celltype_logits = self.celltype_head(ct_pooled)
-
-            if use_oracle_ct:
-                celltype_features = F.one_hot(torch.tensor(center_celltype, device=celltype_logits.device), num_classes=self.num_celltypes).float().detach()
+            assert ct_logits is not None, "ct_logits must be provided if not using oracle CT"
+            if allow_grad_through_ct:
+                # multitask: soft distribution, gradients flow back into ct branch
+                celltype_features = F.softmax(ct_logits, dim=1)
             else:
-                if self.train_multitask:
-                    celltype_features = F.softmax(celltype_logits, dim=1)
-                else:
-                    hard_ct_pred = torch.argmax(celltype_logits, dim=1)
-                    celltype_features = F.one_hot(hard_ct_pred, num_classes=self.num_celltypes).float().detach()
+                # decoupled: hard argmax, detached one-hot
+                hard_ct_pred = torch.argmax(ct_logits, dim=1)
+                celltype_features = F.one_hot(hard_ct_pred, num_classes=self.num_celltypes).float().detach()
 
-            # Late fusion with predicted cell type and optional inject
-            fused_features = torch.cat([expr_pooled, celltype_features], dim=1)
-            if inject is not None:
-                fused_features = torch.cat([fused_features, inject], dim=1)
+        fused = torch.cat([expr_pooled, celltype_features], dim=1)
+        if inject is not None:
+            fused = torch.cat([fused, inject], dim=1)
 
-            # Final expression prediction via MLP
-            expr_out = self.expr_mlp(fused_features)
-            return expr_out, celltype_logits
+        expr_out = self.expr_mlp(fused)
+        return expr_out
+
+    def forward(
+        self,
+        x,
+        edge_index,
+        batch,
+        inject=None,
+        gene_names=None,
+        use_oracle_ct=False,
+        center_celltype=None,
+        allow_grad_through_ct=False,
+    ):
+        """Wrapper that returns (expr_out, ct_logits) when predict_celltype=True, otherwise only expr_out"""
+        if not self.predict_celltype:
+            expr_out = self.forward_expression(
+                x=x,
+                edge_index=edge_index,
+                batch=batch,
+                inject=inject,
+                gene_names=gene_names,
+                use_oracle_ct=False,
+                center_celltype=None,
+                ct_logits=None,
+                allow_grad_through_ct=False,
+            )
+            return expr_out
+
+        ct_logits = self.forward_celltype(x, edge_index, batch)
+        expr_out = self.forward_expression(
+            x=x,
+            edge_index=edge_index,
+            batch=batch,
+            inject=inject,
+            gene_names=gene_names,
+            use_oracle_ct=use_oracle_ct,
+            center_celltype=center_celltype,
+            ct_logits=ct_logits,
+            allow_grad_through_ct=allow_grad_through_ct,
+        )
+        return expr_out, ct_logits
 
 
 def bmc_loss(pred, target, noise_var):
@@ -388,80 +442,89 @@ def _get_expression_params(model):
 def train(
     model,
     loader,
-    criterion, 
-    expr_optimizer, 
-    ct_optimizer=None, 
-    gene_names=None, 
-    inject=False, 
-    device="cuda", 
-    celltype_weight=1.0
+    criterion,
+    expr_optimizer,
+    ct_optimizer=None,
+    gene_names=None,
+    inject=False,
+    device="cuda",
+    celltype_weight=1.0,
 ):
     model.train()
+
     for batch in loader:
-        batch.to(device)
-
+        batch = batch.to(device)
         center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
+        center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
 
-        # Multitask: Use expr_optimizer for both expression and celltype prediction
+        # Case 1: multitask, shared gradients
         if model.predict_celltype and model.train_multitask:
             expr_optimizer.zero_grad(set_to_none=True)
-            center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
-            expr_out, celltype_features = model(
-                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
-                inject=(batch.inject if inject else None), gene_names=gene_names, 
-                use_oracle_ct=True,
-                center_celltype=center_celltypes,
+
+            # forward with gradient flow through ct branch
+            expr_out, ct_logits = model(
+                x=batch.x,
+                edge_index=batch.edge_index,
+                batch=batch.batch,
+                inject=(batch.inject if inject else None),
+                gene_names=gene_names,
+                use_oracle_ct=False,
+                center_celltype=None,
+                allow_grad_through_ct=True,
             )
+
             expr_loss = criterion(expr_out, batch.y)
-            ct_loss = F.cross_entropy(celltype_features, center_ct)
-            (expr_loss + celltype_weight * ct_loss).backward()
+            ct_loss = F.cross_entropy(ct_logits, center_ct)
+            total_loss = expr_loss + celltype_weight * ct_loss
+            total_loss.backward()
             expr_optimizer.step()
             continue
 
-        # Two-step training: Use expr_optimizer for expression prediction and ct_optimizer for celltype prediction
+        # Case 2: two-step decoupled training
         if model.predict_celltype and not model.train_multitask:
-            # Step 1: celltype-only
-            for p in ct_optimizer.param_groups[0]['params']: p.requires_grad_(True)
-            for p in expr_optimizer.param_groups[0]['params']: p.requires_grad_(False)
-
+            # ct step (only ct optimizer, only ct params)
             ct_optimizer.zero_grad(set_to_none=True)
-            center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
-            _, celltype_features = model(
-                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
-                inject=(batch.inject if inject else None), gene_names=gene_names, 
-                use_oracle_ct=True,
-                center_celltype=center_celltypes,
-            )
-            ct_loss = F.cross_entropy(celltype_features, center_ct)
+            ct_logits = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
+            ct_loss = F.cross_entropy(ct_logits, center_ct)
             ct_loss.backward()
             ct_optimizer.step()
 
-            # Step 2: expression-only
-            for p in ct_optimizer.param_groups[0]['params']: p.requires_grad_(False)
-            for p in expr_optimizer.param_groups[0]['params']: p.requires_grad_(True)
-
+            # Expression step (only expr optimizer, celltype treated as fixed)
             expr_optimizer.zero_grad(set_to_none=True)
-            expr_out, _ = model(
-                x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
-                inject=(batch.inject if inject else None), gene_names=gene_names,
-                use_oracle_ct=True,
-                center_celltype=center_celltypes,
+            with torch.no_grad():
+                ct_logits_detached = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
+
+            expr_out = model.forward_expression(
+                x=batch.x,
+                edge_index=batch.edge_index,
+                batch=batch.batch,
+                inject=(batch.inject if inject else None),
+                gene_names=gene_names,
+                use_oracle_ct=False,
+                center_celltype=None,
+                ct_logits=ct_logits_detached,
+                allow_grad_through_ct=False,   # ensures no accidental graph links
             )
             expr_loss = criterion(expr_out, batch.y)
             expr_loss.backward()
             expr_optimizer.step()
+            continue
 
-            # Reenable for next iter
-            for p in ct_optimizer.param_groups[0]['params'] + expr_optimizer.param_groups[0]['params']:
-                p.requires_grad_(True)
-        else:
-            # Single-task expression prediction
-            expr_optimizer.zero_grad(set_to_none=True)
-            out = model(x=batch.x, edge_index=batch.edge_index, batch=batch.batch,
-                        inject=(batch.inject if inject else None), gene_names=gene_names)
-            loss = criterion(out, batch.y)
-            loss.backward()
-            expr_optimizer.step()
+        # Case 3: Expression-only model
+        expr_optimizer.zero_grad(set_to_none=True)
+        out = model.forward_expression(
+            x=batch.x,
+            edge_index=batch.edge_index,
+            batch=batch.batch,
+            inject=(batch.inject if inject else None),
+            gene_names=gene_names,
+            ct_logits=None,
+            use_oracle_ct=False,
+        )
+        loss = criterion(out, batch.y)
+        loss.backward()
+        expr_optimizer.step()
+
 
 def test(
     model, 
@@ -491,35 +554,34 @@ def test(
             'batch': batch.batch,
             'inject': batch.inject if inject else None,
             'gene_names': gene_names,
-            'use_oracle_ct': True,
-            'center_celltype': center_celltypes,
+            'use_oracle_ct': False,
         }
         
         forward_output = model(**forward_args)
         
         # Handle both single-task and multi-task outputs
         if model.predict_celltype:
-            out, celltype_logits = forward_output  # Unpack tuple
+            expr_out, celltype_logits = forward_output  # Unpack tuple
             all_ct_preds.append(celltype_logits)
             all_ct_targets.append(center_celltypes)
         else:
-            out = forward_output
+            expr_out = forward_output
         
         target = batch.y.unsqueeze(1)
 
-        all_preds.append(out.detach().cpu().numpy())
+        all_preds.append(expr_out.detach().cpu().numpy())
         all_targets.append(target.detach().cpu().numpy())
         
         if loss == "mse":
-            errors.append(F.mse_loss(out, target).sqrt().item())
+            errors.append(F.mse_loss(expr_out, target).sqrt().item())
         elif loss == "l1":
-            errors.append(F.l1_loss(out, target).item())
+            errors.append(F.l1_loss(expr_out, target).item())
         elif loss == "weightedl1":
-            errors.append(weighted_l1_loss(out, target, criterion.zero_weight, criterion.nonzero_weight).item())
+            errors.append(weighted_l1_loss(expr_out, target, criterion.zero_weight, criterion.nonzero_weight).item())
         elif loss == "balanced_mse":
-            errors.append(bmc_loss(out, target, criterion.noise_sigma**2).item())
+            errors.append(bmc_loss(expr_out, target, criterion.noise_sigma**2).item())
         elif loss == "npcc":
-            errors.append(npcc_loss(out, target).item())
+            errors.append(npcc_loss(expr_out, target).item())
 
     all_preds = np.concatenate(all_preds)
     all_targets = np.concatenate(all_targets)

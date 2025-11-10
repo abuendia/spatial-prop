@@ -380,14 +380,14 @@ def main():
     model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
     model_dir_name = f"{model_dir_name}_GenePT_all_genes"
 
-    model_save_dir = os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
+    model_save_dir = os.path.join(f"output/{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
     os.makedirs(model_save_dir, exist_ok=True)
     
     # Set up logging
     if args.log_to_terminal:
         print(f"Logging to terminal in addition to file", flush=True)
     else:
-        log_file = setup_logging_to_file(os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name)) 
+        log_file = setup_logging_to_file(os.path.join(f"output/{args.exp_name}/results/gnn", exp_dir_name)) 
 
     test_loader, gene_names, (model, model_config, _) = train_model_from_scratch(
         k_hop=args.k_hop,
