@@ -187,7 +187,7 @@ class GNN(torch.nn.Module):
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
     def _forward_expr_backbone(self, x, edge_index, batch, gene_names=None):
-        # Optionally augment node features with GenePT (early fusion)
+        # GenePT early fusion
         if self.genept_strategy == "early_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
             x = torch.cat([x, weighted_genept_embeddings], dim=1)
@@ -197,6 +197,7 @@ class GNN(torch.nn.Module):
         for i, conv in enumerate(self.convs):
             h = conv(h, edge_index) if i == len(self.convs)-1 else F.relu(conv(h, edge_index))
 
+        # GenePT late fusion 
         if self.genept_strategy == "late_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
             h = torch.cat([h, weighted_genept_embeddings], dim=1)
@@ -449,6 +450,7 @@ def train(
     inject=False,
     device="cuda",
     celltype_weight=1.0,
+    class_weights=None,
 ):
     model.train()
 
@@ -474,7 +476,7 @@ def train(
             )
 
             expr_loss = criterion(expr_out, batch.y)
-            ct_loss = F.cross_entropy(ct_logits, center_ct)
+            ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
             total_loss = expr_loss + celltype_weight * ct_loss
             total_loss.backward()
             expr_optimizer.step()
@@ -485,7 +487,7 @@ def train(
             # ct step (only ct optimizer, only ct params)
             ct_optimizer.zero_grad(set_to_none=True)
             ct_logits = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
-            ct_loss = F.cross_entropy(ct_logits, center_ct)
+            ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
             ct_loss.backward()
             ct_optimizer.step()
 

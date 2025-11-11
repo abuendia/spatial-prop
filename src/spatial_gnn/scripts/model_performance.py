@@ -448,6 +448,12 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     )
     overall_stats_dict.to_csv(os.path.join(save_dir, "test_evaluation_stats_macro_micro.csv"), index=False)
 
+    # save the dictionary for each cell type
+    with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'wb') as f:
+        pickle.dump(ct_mean_stats_dict, f)
+    with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype_nonzero_genes.pkl"), 'wb') as f:
+        pickle.dump(ct_mean_stats_dict_nonzero, f)
+
     # #--------------------------------
     # metric_col = []
     # ct_col = []

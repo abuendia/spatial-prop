@@ -5,6 +5,7 @@ TRAIN_MULTITASK=$3
 GENEPT_STRATEGY=$4
 EPOCHS=$5
 DEBUG=$6
+GPU=$7
 GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 
@@ -54,7 +55,7 @@ fi
 echo "EXP_NAME: $EXP_NAME"
 
 
-CUDA_VISIBLE_DEVICES=0 python $BASE/src/spatial_gnn/scripts/train_gnn_with_celltype.py \
+CUDA_VISIBLE_DEVICES="$GPU" python $BASE/src/spatial_gnn/scripts/train_gnn_with_celltype.py \
       --dataset "$DATASET" \
       --base_path "$BASE/data/raw" \
       --k_hop 2 \

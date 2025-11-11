@@ -7,6 +7,7 @@ import scanpy as sc
 import json
 import os
 import sys
+from collections import Counter
 
 import torch
 from torch_geometric.loader import DataLoader
@@ -224,6 +225,26 @@ def train_model_from_scratch(
     model.to(device)
     print(f"Model initialized on {device}")
 
+    if predict_celltype:
+        label_counts = Counter()
+        for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="Counting cell type labels"):
+            # map string label -> integer index
+            center_celltypes_idx = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
+            label_counts.update(center_celltypes_idx)
+
+        print(f"Label counts (by index): {label_counts}", flush=True)
+
+        total_labels = sum(label_counts.values())
+        num_classes = len(model.celltypes_to_index)
+
+        freqs = [label_counts[i] / total_labels for i in range(num_classes)]
+        class_weights = [1.0 / (f + 1e-12) for f in freqs]        # inverse frequency with stability
+        class_weights = torch.tensor(class_weights, device=device)
+        print(f"Freqs: {freqs}", flush=True)
+        print(f"Class weights: {class_weights}", flush=True)
+    else:
+        class_weights = None
+
     # Setup optimizers
     if predict_celltype and train_multitask:
         expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -260,7 +281,7 @@ def train_model_from_scratch(
 
     for epoch in range(1, epochs + 1):
         # Training
-        train(model, train_loader, criterion, expr_optimizer, ct_optimizer, gene_names=gene_names, inject=inject, device=device, celltype_weight=1.0)
+        train(model, train_loader, criterion, expr_optimizer, ct_optimizer, gene_names=gene_names, inject=inject, device=device, celltype_weight=1.0, class_weights=class_weights)
 
 
         train_score, _, _ = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
