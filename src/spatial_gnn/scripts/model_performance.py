@@ -301,236 +301,184 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     df_cell = pd.DataFrame(np.vstack((cell_r, cell_s, cell_r2, cell_mae, cell_rmse)).T,
                            columns=["Pearson","Spearman","R2","MAE", "RMSE"])
     df_cell.to_csv(os.path.join(save_dir, "test_evaluation_stats_cell.csv"), index=False)
-    
-    # Calculate micro and macro averages
-    print("Computing micro and macro averages...", flush=True)
-    
-    # Micro averages: computed over all individual cell-gene pairs
-    # Flatten predictions and actuals to get all cell-gene pairs
-    preds_flat = preds.flatten()
-    actuals_flat = actuals.flatten()
-    
-    micro_r, _ = pearsonr(preds_flat, actuals_flat)
-    micro_s, _ = spearmanr(preds_flat, actuals_flat)
-    micro_r2 = r2_score(actuals_flat, preds_flat)
-    micro_mae = np.mean(np.abs(preds_flat - actuals_flat))
-    micro_rmse = np.sqrt(np.mean((preds_flat - actuals_flat)**2))
-    
-    # Macro averages: average of cell-type-specific averages
-    # Get cell type specific averages
-    celltype_means = {}
-    for ct in np.unique(celltypes):
-        ct_mask = celltypes == ct
-        if np.sum(ct_mask) > 0:
-            ct_preds = preds[ct_mask, :].flatten()
-            ct_actuals = actuals[ct_mask, :].flatten()
-            
-            if len(ct_preds) > 1:
-                ct_r, _ = pearsonr(ct_preds, ct_actuals)
-                ct_s, _ = spearmanr(ct_preds, ct_actuals)
-                ct_r2 = r2_score(ct_actuals, ct_preds)
-                ct_mae = np.mean(np.abs(ct_preds - ct_actuals))
-                ct_rmse = np.sqrt(np.mean((ct_preds - ct_actuals)**2))
-            else:
-                ct_r = ct_s = ct_r2 = ct_mae = ct_rmse = np.nan
-            
-            celltype_means[ct] = {
-                'pearson': ct_r,
-                'spearman': ct_s,
-                'r2': ct_r2,
-                'mae': ct_mae,
-                'rmse': ct_rmse
-            }
-    
-    # Calculate macro averages (average of cell type means)
-    macro_r = np.nanmean([stats['pearson'] for stats in celltype_means.values()])
-    macro_s = np.nanmean([stats['spearman'] for stats in celltype_means.values()])
-    macro_r2 = np.nanmean([stats['r2'] for stats in celltype_means.values()])
-    macro_mae = np.nanmean([stats['mae'] for stats in celltype_means.values()])
-    macro_rmse = np.nanmean([stats['rmse'] for stats in celltype_means.values()])
-    
-    # Create summary dataframe
-    summary_stats = pd.DataFrame({
-        'Metric': ['Pearson', 'Spearman', 'R2', 'MAE', 'RMSE'],
-        'Micro_Average': [micro_r, micro_s, micro_r2, micro_mae, micro_rmse],
-        'Macro_Average': [macro_r, macro_s, macro_r2, macro_mae, macro_rmse]
-    })
-    
-    # Save summary statistics
-    summary_stats.to_csv(os.path.join(save_dir, "test_evaluation_summary_micro_macro.csv"), index=False)
-    
-    # print bulk results
+
+    # Print bulk results
     print("Finished bulk analysis:", flush=True)
     print("Cell:", flush=True)
     print(df_cell.median(axis=0), flush=True)
     print("Gene:", flush=True)
     print(df_gene.median(axis=0), flush=True)
-    print("\nMicro and Macro Averages:", flush=True)
-    print(summary_stats.to_string(index=False), flush=True)
     
-    # stats broken down by cell type
-    ct_stats_dict = {}
+    # Calculate micro and macro averages
+    print("Computing micro and macro averages...", flush=True)
+        
+    # Micro averages: computed over all individual cell-gene pairs
+    preds_flat = preds.flatten()
+    actuals_flat = actuals.flatten()
+
+    # also compute over non-zero values
+    preds_flat_nonzero = preds_flat[actuals_flat != 0]
+    actuals_flat_nonzero = actuals_flat[actuals_flat != 0]
+
+    micro_r, _ = pearsonr(preds_flat, actuals_flat)
+    micro_s, _ = spearmanr(preds_flat, actuals_flat)
+    micro_r2 = r2_score(actuals_flat, preds_flat)
+    micro_mae = np.mean(np.abs(preds_flat - actuals_flat))
+    micro_rmse = np.sqrt(np.mean((preds_flat - actuals_flat)**2))
+
+    micro_r_nonzero, _ = pearsonr(preds_flat_nonzero, actuals_flat_nonzero)
+    micro_s_nonzero, _ = spearmanr(preds_flat_nonzero, actuals_flat_nonzero)
+    micro_r2_nonzero = r2_score(actuals_flat_nonzero, preds_flat_nonzero)
+    micro_mae_nonzero = np.mean(np.abs(preds_flat_nonzero - actuals_flat_nonzero))
+    micro_rmse_nonzero = np.sqrt(np.mean((preds_flat_nonzero - actuals_flat_nonzero)**2))
+
+    # Macro averages: computed over all cell types
+    ct_mean_stats_dict = {}
+    ct_mean_stats_dict_nonzero = {}
 
     for ct in np.unique(celltypes):
-        
-        ct_stats_dict[ct] = {}
 
-        # gene stats
-        gene_r = []
-        gene_s = []
-        gene_r2 = []
-        gene_mae = []
-        gene_rmse = []
+        ct_mean_stats_dict[ct] = {}
+        ct_mean_stats_dict_nonzero[ct] = {}
 
-        for g in range(preds.shape[1]):
-            
-            if len(preds[celltypes==ct,g]) > 1:
-                r, p = pearsonr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
-                s, p = spearmanr(preds[celltypes==ct,g], actuals[celltypes==ct,g])
-                r2 = r2_score(actuals[celltypes==ct,g], preds[celltypes==ct,g])
-                gene_mae.append(np.mean(np.abs(preds[celltypes==ct,g]-actuals[celltypes==ct,g])))
-                gene_rmse.append(np.sqrt(np.mean((preds[celltypes==ct,g]-actuals[celltypes==ct,g])**2)))
-            else:
-                r = np.nan
-                s = np.nan
-                r2 = np.nan
-                gene_mae.append(np.nan)
-                gene_rmse.append(np.nan)
-                
-            gene_r.append(r)
-            gene_s.append(s)
-            gene_r2.append(r2)
-
-        
-        # cell stats
         cell_r = []
         cell_s = []
         cell_r2 = []
         cell_mae = []
         cell_rmse = []
 
+        cell_r_nonzero = []
+        cell_s_nonzero = []
+        cell_r2_nonzero = []
+        cell_mae_nonzero = []
+        cell_rmse_nonzero = []
+
         for c in np.where(celltypes==ct)[0]:
-            
+
             if len(preds[c,:]) > 1:
                 r, p = pearsonr(preds[c,:], actuals[c,:])
                 s, p = spearmanr(preds[c,:], actuals[c,:])
                 r2 = r2_score(actuals[c,:], preds[c,:])
-                cell_mae.append(np.mean(np.abs(preds[c,:]-actuals[c,:])))
-                cell_rmse.append(np.sqrt(np.mean((preds[c,:]-actuals[c,:])**2)))
+                mae = np.mean(np.abs(preds[c,:]-actuals[c,:]))
+                rmse = np.sqrt(np.mean((preds[c,:]-actuals[c,:])**2))
             else:
                 r = np.nan
                 s = np.nan
                 r2 = np.nan
-                gene_mae.append(np.nan)
-                gene_rmse.append(np.nan)
+                mae = np.nan
+                rmse = np.nan
             
             cell_r.append(r)
             cell_s.append(s)
             cell_r2.append(r2)
+            cell_mae.append(mae)
+            cell_rmse.append(rmse)
 
-            #pred_ct = celltypes==ct
+            # non-zero values
+            if len(preds[c,:][actuals[c,:] != 0]) > 1:
+                r_nonzero, p_nonzero = pearsonr(preds[c,:][actuals[c,:] != 0], actuals[c,:][actuals[c,:] != 0])
+                s_nonzero, p_nonzero = spearmanr(preds[c,:][actuals[c,:] != 0], actuals[c,:][actuals[c,:] != 0])
+                r2_nonzero = r2_score(actuals[c,:][actuals[c,:] != 0], preds[c,:][actuals[c,:] != 0])
+                mae_nonzero = np.mean(np.abs(preds[c,:][actuals[c,:] != 0]-actuals[c,:][actuals[c,:] != 0]))
+                rmse_nonzero = np.sqrt(np.mean((preds[c,:][actuals[c,:] != 0]-actuals[c,:][actuals[c,:] != 0])**2))
+            else:
+                r_nonzero = np.nan
+                s_nonzero = np.nan
+                r2_nonzero = np.nan
+                mae_nonzero = np.nan
+                rmse_nonzero = np.nan
             
-        # add results to dictionary
-        ct_stats_dict[ct]["Gene - Pearson (mean)"] = robust_nanmean(gene_r) 
-        ct_stats_dict[ct]["Gene - Pearson (median)"] = robust_nanmedian(gene_r)
-        ct_stats_dict[ct]["Gene - Spearman (mean)"] = robust_nanmean(gene_s)
-        ct_stats_dict[ct]["Gene - Spearman (median)"] = robust_nanmedian(gene_s)
-        ct_stats_dict[ct]["Gene - R2 (mean)"] = robust_nanmean(gene_r2)
-        ct_stats_dict[ct]["Gene - R2 (median)"] = robust_nanmedian(gene_r2)
-        ct_stats_dict[ct]["Gene - MAE (mean)"] = robust_nanmean(gene_mae)
-        ct_stats_dict[ct]["Gene - RMSE (mean)"] = robust_nanmean(gene_rmse)
-        
-        ct_stats_dict[ct]["Cell - Pearson (mean)"] = robust_nanmean(cell_r)
-        ct_stats_dict[ct]["Cell - Pearson (median)"] = robust_nanmedian(cell_r)
-        ct_stats_dict[ct]["Cell - Spearman (mean)"] = robust_nanmean(cell_s)
-        ct_stats_dict[ct]["Cell - Spearman (median)"] = robust_nanmedian(cell_s)
-        ct_stats_dict[ct]["Cell - R2 (mean)"] = robust_nanmean(cell_r2)
-        ct_stats_dict[ct]["Cell - R2 (median)"] = robust_nanmedian(cell_r2)
-        ct_stats_dict[ct]["Cell - MAE (mean)"] = robust_nanmean(cell_mae)
-        ct_stats_dict[ct]["Cell - RMSE (mean)"] = robust_nanmean(cell_rmse)
-    
-    # save cell type results
-    with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'wb') as f:
-        pickle.dump(ct_stats_dict, f)
-    
-    # make cell type plots
-    
-    # Cell stat plots
-    with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'rb') as handle:
-        ct_stats_dict = pickle.load(handle)
+            cell_r_nonzero.append(r_nonzero)
+            cell_s_nonzero.append(s_nonzero)
+            cell_r2_nonzero.append(r2_nonzero)
+            cell_mae_nonzero.append(mae_nonzero)
+            cell_rmse_nonzero.append(rmse_nonzero)
 
-    columns_to_plot = ["Cell - Pearson (median)", "Cell - Spearman (median)", "Cell - R2 (median)"]
-        
-    #--------------------------------
-    metric_col = []
-    ct_col = []
-    val_col = []
+        ct_mean_stats_dict[ct]["Cell - Pearson (mean)"] = robust_nanmean(cell_r)
+        ct_mean_stats_dict[ct]["Cell - Spearman (mean)"] = robust_nanmean(cell_s)
+        ct_mean_stats_dict[ct]["Cell - R2 (mean)"] = robust_nanmean(cell_r2)
+        ct_mean_stats_dict[ct]["Cell - MAE (mean)"] = robust_nanmean(cell_mae)
+        ct_mean_stats_dict[ct]["Cell - RMSE (mean)"] = robust_nanmean(cell_rmse)
 
-    for col in columns_to_plot:
-        for ct in ct_stats_dict.keys():
-            val = ct_stats_dict[ct][col]
+        ct_mean_stats_dict_nonzero[ct]["Cell - Pearson (mean)"] = robust_nanmean(cell_r_nonzero)
+        ct_mean_stats_dict_nonzero[ct]["Cell - Spearman (mean)"] = robust_nanmean(cell_s_nonzero)
+        ct_mean_stats_dict_nonzero[ct]["Cell - R2 (mean)"] = robust_nanmean(cell_r2_nonzero)
+        ct_mean_stats_dict_nonzero[ct]["Cell - MAE (mean)"] = robust_nanmean(cell_mae_nonzero)
+        ct_mean_stats_dict_nonzero[ct]["Cell - RMSE (mean)"] = robust_nanmean(cell_rmse_nonzero)
+
+    # get macro average as average over cell type in 
+    macro_r = robust_nanmean(np.array([ct_mean_stats_dict[ct]["Cell - Pearson (mean)"] for ct in ct_mean_stats_dict.keys()]))
+    macro_s = robust_nanmean(np.array([ct_mean_stats_dict[ct]["Cell - Spearman (mean)"] for ct in ct_mean_stats_dict.keys()]))
+    macro_r2 = robust_nanmean(np.array([ct_mean_stats_dict[ct]["Cell - R2 (mean)"] for ct in ct_mean_stats_dict.keys()]))
+    macro_mae = robust_nanmean(np.array([ct_mean_stats_dict[ct]["Cell - MAE (mean)"] for ct in ct_mean_stats_dict.keys()]))
+    macro_rmse = robust_nanmean(np.array([ct_mean_stats_dict[ct]["Cell - RMSE (mean)"] for ct in ct_mean_stats_dict.keys()]))
+
+    macro_r_nonzero = robust_nanmean(np.array([ct_mean_stats_dict_nonzero[ct]["Cell - Pearson (mean)"] for ct in ct_mean_stats_dict_nonzero.keys()]))
+    macro_s_nonzero = robust_nanmean(np.array([ct_mean_stats_dict_nonzero[ct]["Cell - Spearman (mean)"] for ct in ct_mean_stats_dict_nonzero.keys()]))
+    macro_r2_nonzero = robust_nanmean(np.array([ct_mean_stats_dict_nonzero[ct]["Cell - R2 (mean)"] for ct in ct_mean_stats_dict_nonzero.keys()]))
+    macro_mae_nonzero = robust_nanmean(np.array([ct_mean_stats_dict_nonzero[ct]["Cell - MAE (mean)"] for ct in ct_mean_stats_dict_nonzero.keys()]))
+    macro_rmse_nonzero = robust_nanmean(np.array([ct_mean_stats_dict_nonzero[ct]["Cell - RMSE (mean)"] for ct in ct_mean_stats_dict_nonzero.keys()]))
+
+    # save macro and micro averages in one dataframe
+    overall_stats_dict = {
+        "Macro - Pearson": macro_r,
+        "Macro - Spearman": macro_s,
+        "Macro - R2": macro_r2,
+        "Macro - MAE": macro_mae,
+        "Macro - RMSE": macro_rmse,
+        "Macro (Nonzero) - Pearson": macro_r_nonzero,
+        "Macro (Nonzero) - Spearman": macro_s_nonzero,
+        "Macro (Nonzero) - R2": macro_r2_nonzero,
+        "Macro (Nonzero) - MAE": macro_mae_nonzero,
+        "Macro (Nonzero) - RMSE": macro_rmse_nonzero,
+        "Micro - Pearson": micro_r,
+        "Micro - Spearman": micro_s,
+        "Micro - R2": micro_r2,
+        "Micro - MAE": micro_mae,
+        "Micro - RMSE": micro_rmse,
+        "Micro (Nonzero) - Pearson": micro_r_nonzero,
+        "Micro (Nonzero) - Spearman": micro_s_nonzero,
+        "Micro (Nonzero) - R2": micro_r2_nonzero,
+        "Micro (Nonzero) - MAE": micro_mae_nonzero,
+        "Micro (Nonzero) - RMSE": micro_rmse_nonzero,
+    }
+    overall_stats_dict = pd.DataFrame(
+        list(overall_stats_dict.items()),
+        columns=["Metric", "Value"]
+    )
+    overall_stats_dict.to_csv(os.path.join(save_dir, "test_evaluation_stats_macro_micro.csv"), index=False)
+
+    # #--------------------------------
+    # metric_col = []
+    # ct_col = []
+    # val_col = []
+
+    # for col in columns_to_plot:
+    #     for ct in ct_stats_dict.keys():
+    #         val = ct_stats_dict[ct][col]
             
-            metric_col.append(col)
-            ct_col.append(ct)
-            val_col.append(val)
+    #         metric_col.append(col)
+    #         ct_col.append(ct)
+    #         val_col.append(val)
 
-    plot_df = pd.DataFrame(np.vstack((metric_col, ct_col, val_col)).T, columns=["Metric","Cell type","Value"])
-    plot_df["Value"] = plot_df["Value"].astype(float)
+    # plot_df = pd.DataFrame(np.vstack((metric_col, ct_col, val_col)).T, columns=["Metric","Cell type","Value"])
+    # plot_df["Value"] = plot_df["Value"].astype(float)
 
-    # plot
-    fig, ax = plt.subplots(figsize=(12,4))
-    sns.barplot(plot_df, x="Cell type", y="Value", hue="Metric", palette="Reds", ax=ax)
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-    plt.title(save_dir.split("/")[-2], fontsize=14)
-    plt.xticks(rotation=30, ha='right', fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.xlabel("Cell type", fontsize=14)
-    plt.ylabel("Metric Value", fontsize=14)
-    plt.setp(ax.get_legend().get_texts(), fontsize='14')
-    plt.setp(ax.get_legend().get_title(), fontsize='16')
-    plt.tight_layout()
-    #plt.savefig("plots/expression_prediction_performance/"+save_dir.split("/")[-2]+"_CELL.pdf", bbox_inches='tight')
-    plt.savefig(os.path.join(save_dir, "prediction_performance_CELL.pdf"), bbox_inches='tight')
-    plt.close()
-    
-    
-    # Gene stats plots
-    with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'rb') as handle:
-        ct_stats_dict = pickle.load(handle)
-
-    columns_to_plot = ["Gene - Pearson (median)", "Gene - Spearman (median)"]
+    # # plot
+    # fig, ax = plt.subplots(figsize=(12,4))
+    # sns.barplot(plot_df, x="Cell type", y="Value", hue="Metric", palette="Reds", ax=ax)
+    # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
+    # plt.title(save_dir.split("/")[-2], fontsize=14)
+    # plt.xticks(rotation=30, ha='right', fontsize=12)
+    # plt.yticks(fontsize=12)
+    # plt.xlabel("Cell type", fontsize=14)
+    # plt.ylabel("Metric Value", fontsize=14)
+    # plt.setp(ax.get_legend().get_texts(), fontsize='14')
+    # plt.setp(ax.get_legend().get_title(), fontsize='16')
+    # plt.tight_layout()
+    # plt.savefig(os.path.join(save_dir, "prediction_performance_CELL.pdf"), bbox_inches='tight')
+    # plt.close()
         
-    #--------------------------------
-    metric_col = []
-    ct_col = []
-    val_col = []
-
-    for col in columns_to_plot:
-        for ct in ct_stats_dict.keys():
-            val = ct_stats_dict[ct][col]
-            
-            metric_col.append(col)
-            ct_col.append(ct)
-            val_col.append(val)
-
-    plot_df = pd.DataFrame(np.vstack((metric_col, ct_col, val_col)).T, columns=["Metric","Cell type","Value"])
-    plot_df["Value"] = plot_df["Value"].astype(float)
-
-    # plot
-    fig, ax = plt.subplots(figsize=(12,4))
-    sns.barplot(plot_df, x="Cell type", y="Value", hue="Metric", palette="Reds", ax=ax)
-    sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-    plt.title(save_dir.split("/")[-2], fontsize=14)
-    plt.xticks(rotation=30, ha='right', fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.xlabel("Cell type", fontsize=14)
-    plt.ylabel("Metric Value", fontsize=14)
-    plt.setp(ax.get_legend().get_texts(), fontsize='14')
-    plt.setp(ax.get_legend().get_title(), fontsize='16')
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "prediction_performance_GENE.pdf"))
-    plt.close()
-    
     print("Finished cell type analysis.", flush=True)
     
 

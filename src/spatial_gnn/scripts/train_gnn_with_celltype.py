@@ -225,14 +225,17 @@ def train_model_from_scratch(
     print(f"Model initialized on {device}")
 
     # Setup optimizers
-    if train_multitask:
+    if predict_celltype and train_multitask:
         expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         ct_optimizer = None
-    else:
+    elif predict_celltype and not train_multitask:
         expr_params, expr_param_ids = _get_expression_params(model)
         ct_params, ct_param_ids = _get_celltype_params(model)
         expr_optimizer = torch.optim.Adam(expr_params, lr=learning_rate)
         ct_optimizer = torch.optim.Adam(ct_params, lr=learning_rate)
+    else:
+        expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        ct_optimizer = None
 
     # Setup loss function
     if loss == "mse":
@@ -395,9 +398,7 @@ def main():
         exp_dir_name = f"DEBUG_{exp_dir_name}"
 
     model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
-    model_dir_name = f"{model_dir_name}_GenePT_all_genes"
-
-    model_save_dir = os.path.join(f"output/{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
+    model_save_dir = os.path.join(f"output/{args.exp_name}", exp_dir_name, model_dir_name)
     os.makedirs(model_save_dir, exist_ok=True)
     
     # Set up logging
@@ -405,7 +406,7 @@ def main():
         print(f"Logging to terminal in addition to file", flush=True)
     else:
         print(f"Logging to file only", flush=True)
-        log_file = setup_logging_to_file(os.path.join(f"output/{args.exp_name}/results/gnn", exp_dir_name)) 
+        log_file = setup_logging_to_file(os.path.join(f"output/{args.exp_name}", exp_dir_name)) 
 
     test_loader, gene_names, (model, model_config, _) = train_model_from_scratch(
         k_hop=args.k_hop,

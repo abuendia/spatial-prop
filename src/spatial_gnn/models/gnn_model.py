@@ -585,13 +585,15 @@ def test(
 
     all_preds = np.concatenate(all_preds)
     all_targets = np.concatenate(all_targets)
-    all_ct_preds = torch.cat(all_ct_preds, dim=0)
-    all_ct_targets = np.concatenate(all_ct_targets)
-
     spearman = compute_spearman(all_preds, all_targets)
-    celltype_accuracy = compute_celltype_accuracy(all_ct_preds, all_ct_targets)
 
-    return np.mean(errors), spearman, celltype_accuracy
+    if model.predict_celltype:
+        all_ct_preds = torch.cat(all_ct_preds, dim=0)
+        all_ct_targets = np.concatenate(all_ct_targets)
+        celltype_accuracy = compute_celltype_accuracy(all_ct_preds, all_ct_targets)
+        return np.mean(errors), spearman, celltype_accuracy
+    else:
+        return np.mean(errors), spearman, 0.0
 
 def predict(model, dataloader, adata, gene_names=None, device="cuda"):
     """
