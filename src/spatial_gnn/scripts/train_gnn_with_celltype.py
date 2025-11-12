@@ -12,11 +12,12 @@ from collections import Counter
 import torch
 from torch_geometric.loader import DataLoader
 
-from spatial_gnn.models.gnn_model import GNN, train, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
+from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
 from spatial_gnn.scripts.model_performance import eval_model
+from spatial_gnn.utils.metric_utils import compute_celltype_accuracy
 
 
 def train_model_from_scratch(
@@ -46,6 +47,8 @@ def train_model_from_scratch(
     genept_strategy: Optional[str] = None,
     predict_celltype: bool = False,
     train_multitask: bool = False,
+    use_oracle_ct: bool = False,
+    ablate_gene_expression: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -100,6 +103,8 @@ def train_model_from_scratch(
         Path to file containing GenePT embeddings
     train_multitask : bool, default=False
         Whether to train a multitask model
+    use_oracle_ct : bool, default=False
+        Whether to use oracle cell type for cell type prediction
     Returns
     -------
     Tuple[GNN, str]
@@ -208,6 +213,66 @@ def train_model_from_scratch(
     use_genept = genept_embeddings is not None
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
 
+    # For decoupled training, first train a separate cell type model
+    idx_to_ct = {v: k for k, v in celltypes_to_index.items()}
+    celltype_model = None
+    if predict_celltype and not train_multitask and not use_oracle_ct:
+        # Create separate cell type model
+        celltype_model = CellTypeGNN(
+            hidden_channels=64,
+            input_dim=int(train_dataset.get(0).x.shape[1]),
+            num_layers=k_hop,
+            method="GIN",
+            pool="add",
+            celltypes_to_index=celltypes_to_index,
+        )
+        celltype_model.to(device)
+        print(f"Cell type model initialized on {device}")
+        
+        label_counts = Counter()
+        for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="Counting cell type labels"):
+            center_celltypes_idx = [celltypes_to_index[item[0]] for item in batch.center_celltype]
+            label_counts.update(center_celltypes_idx)
+        
+        total_labels = sum(label_counts.values())
+        num_classes = len(celltypes_to_index)
+        freqs = [label_counts[i] / total_labels for i in range(num_classes)]
+        class_weights = [1.0 / (f + 1e-12) for f in freqs]
+        class_weights = torch.tensor(class_weights, device=device)
+        
+        print(f"Training cell type model for {epochs} epochs...")
+        for epoch in range(1, epochs + 1):
+            train_celltype_model(
+                celltype_model,
+                train_loader,
+                class_weights=class_weights,
+                device=device,
+                epochs=1,
+            )
+            
+            celltype_model.eval()
+            all_ct_preds = []
+            all_ct_targets = []
+            with torch.no_grad():
+                for batch in test_loader:
+                    batch = batch.to(device)
+                    center_celltypes_idx = [celltypes_to_index[item[0]] for item in batch.center_celltype]
+                    ct_logits = celltype_model(batch.x, batch.edge_index, batch.batch)
+                    all_ct_preds.append(ct_logits)
+                    all_ct_targets.extend(center_celltypes_idx)
+            
+            all_ct_preds = torch.cat(all_ct_preds, dim=0)
+            ct_accuracy = compute_celltype_accuracy(all_ct_preds, np.array(all_ct_targets))
+
+            print(f"Cell type model - Epoch: {epoch:03d}, Test Celltype Accuracy: {ct_accuracy:.4f}", flush=True)
+            celltype_model.train()
+        
+        celltype_model_path = os.path.join(model_save_dir, "celltype_model.pth")
+        torch.save(celltype_model.state_dict(), celltype_model_path)
+        print(f"Cell type model saved to {celltype_model_path}")
+        celltype_model.eval()  # Set to eval mode for use as oracle
+
+    # Create expression model (with cell type model for decoupled, or standalone for multitask)
     model = GNN(
         hidden_channels=64,
         input_dim=int(train_dataset.get(0).x.shape[1]),
@@ -221,11 +286,14 @@ def train_model_from_scratch(
         celltypes_to_index=celltypes_to_index,
         predict_celltype=predict_celltype,
         train_multitask=train_multitask,
+        celltype_model=celltype_model,  # Pass pre-trained model for decoupled training
+        ablate_gene_expression=ablate_gene_expression
     )
     model.to(device)
-    print(f"Model initialized on {device}")
+    print(f"Expression model initialized on {device}")
 
-    if predict_celltype:
+    # Setup class weights (for multitask training or if not already computed)
+    if predict_celltype and train_multitask:
         label_counts = Counter()
         for batch in tqdm.tqdm(train_loader, total=len(train_loader), desc="Counting cell type labels"):
             # map string label -> integer index
@@ -242,21 +310,13 @@ def train_model_from_scratch(
         class_weights = torch.tensor(class_weights, device=device)
         print(f"Freqs: {freqs}", flush=True)
         print(f"Class weights: {class_weights}", flush=True)
+    elif predict_celltype and not train_multitask:
+        class_weights = None
     else:
         class_weights = None
 
     # Setup optimizers
-    if predict_celltype and train_multitask:
-        expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        ct_optimizer = None
-    elif predict_celltype and not train_multitask:
-        expr_params, expr_param_ids = _get_expression_params(model)
-        ct_params, ct_param_ids = _get_celltype_params(model)
-        expr_optimizer = torch.optim.Adam(expr_params, lr=learning_rate)
-        ct_optimizer = torch.optim.Adam(ct_params, lr=learning_rate)
-    else:
-        expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        ct_optimizer = None
+    expr_optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Setup loss function
     if loss == "mse":
@@ -280,14 +340,10 @@ def train_model_from_scratch(
     training_results = {"metric": loss, "epoch": [], "train": [], "test": [], "test_spearman": [], "test_celltype_accuracy": []}
 
     for epoch in range(1, epochs + 1):
-        # Training
-        train(model, train_loader, criterion, expr_optimizer, ct_optimizer, gene_names=gene_names, inject=inject, device=device, celltype_weight=1.0, class_weights=class_weights)
+        train(model, train_loader, criterion, expr_optimizer, gene_names=gene_names, inject=inject, device=device, celltype_weight=1.0, class_weights=class_weights, use_oracle_ct=use_oracle_ct)
+        train_score, _, _ = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device, use_oracle_ct=use_oracle_ct)
+        test_score, test_spearman, test_celltype_accuracy = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device, use_oracle_ct=use_oracle_ct)
 
-
-        train_score, _, _ = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
-        test_score, test_spearman, test_celltype_accuracy = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device)
-
-        # Save best model
         if test_score < best_score:
             save_dir = model_save_dir
             torch.save(model.state_dict(), os.path.join(save_dir, "best_model.pth"))
@@ -360,7 +416,6 @@ def train_model_from_scratch(
 def main():
     parser = argparse.ArgumentParser()
     
-    # Add mutually exclusive group for data input
     data_group = parser.add_mutually_exclusive_group(required=True)
     data_group.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
     data_group.add_argument("--anndata", help="Path to AnnData file (.h5ad) to use directly", type=str)
@@ -386,6 +441,8 @@ def main():
     parser.add_argument("--log_to_terminal", action='store_true', help="Log to terminal in addition to file")
     parser.add_argument("--predict_celltype", action='store_true', help="Enable cell type prediction")
     parser.add_argument("--train_multitask", action='store_true', help="Enable training a multitask model")
+    parser.add_argument("--use_oracle_ct", action='store_true', help="Use oracle cell type for cell type prediction")
+    parser.add_argument("--ablate_gene_expression", action='store_true', help="Ablate gene expression for expression prediction")
 
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
@@ -456,6 +513,8 @@ def main():
         genept_strategy=args.genept_strategy, 
         predict_celltype=args.predict_celltype,
         train_multitask=args.train_multitask,
+        use_oracle_ct=args.use_oracle_ct,
+        ablate_gene_expression=args.ablate_gene_expression,
     )
 
     if args.do_eval:

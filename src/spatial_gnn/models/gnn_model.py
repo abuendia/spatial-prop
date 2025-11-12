@@ -13,6 +13,81 @@ from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 from spatial_gnn.utils.metric_utils import compute_spearman, compute_celltype_accuracy
 
 
+class CellTypeGNN(torch.nn.Module):
+    """
+    Separate GNN model for cell type prediction only.
+    Used in decoupled training mode where cell type is trained independently.
+    """
+    def __init__(
+        self,
+        hidden_channels,
+        input_dim,
+        num_layers=4,
+        method="GCN",
+        pool="add",
+        celltypes_to_index=None,
+    ):
+        super(CellTypeGNN, self).__init__()
+        torch.manual_seed(444)
+        
+        self.method = method
+        self.pool = pool
+        self.celltypes_to_index = celltypes_to_index
+        self.num_celltypes = len(celltypes_to_index) if celltypes_to_index else 0
+
+        # Cell-type branch GNN
+        if self.method == "GCN":
+            self.ct_conv1 = GCNConv(input_dim, hidden_channels)
+            self.ct_convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
+        elif self.method == "GIN":
+            self.ct_conv1 = GINConv(
+                            Sequential(
+                                Linear(input_dim, hidden_channels),
+                                BatchNorm1d(hidden_channels),
+                                ReLU(),
+                                Linear(hidden_channels, hidden_channels)
+                            )
+                          )
+            self.ct_convs = ModuleList([GINConv(
+                            Sequential(
+                                Linear(hidden_channels, hidden_channels),
+                                BatchNorm1d(hidden_channels),
+                                ReLU(),
+                                Linear(hidden_channels, hidden_channels)
+                            )
+                          ) for _ in range(num_layers - 1)])
+        elif self.method == "SAGE":
+            self.ct_conv1 = SAGEConv(input_dim, hidden_channels)
+            self.ct_convs = ModuleList([SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
+        else:
+            raise Exception("'method' not recognized.")
+
+        # Cell-type classifier head
+        self.celltype_head = Linear(hidden_channels, self.num_celltypes)
+
+    def _pool(self, x, batch):
+        if self.pool == "mean":
+            return global_mean_pool(x, batch)
+        elif self.pool == "add":
+            return global_add_pool(x, batch)
+        elif self.pool == "max":
+            return global_max_pool(x, batch)
+        else:
+            raise ValueError(f"'pool' not recognized: {self.pool}")
+
+    def forward(self, x, edge_index, batch):
+        """Return cell-type logits."""
+        ct_h = self.ct_conv1(x, edge_index)
+        ct_h = F.relu(ct_h)
+        for i, conv in enumerate(self.ct_convs):
+            ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
+
+        ct_pooled = self._pool(ct_h, batch)
+        ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
+        celltype_logits = self.celltype_head(ct_pooled)
+        return celltype_logits
+
+
 class GNN(torch.nn.Module):
     def __init__(
         self,
@@ -28,6 +103,8 @@ class GNN(torch.nn.Module):
         celltypes_to_index=None,
         predict_celltype=False,
         train_multitask=False,
+        celltype_model=None,
+        ablate_gene_expression=False,
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -38,7 +115,9 @@ class GNN(torch.nn.Module):
         self.predict_celltype = predict_celltype
         self.train_multitask = train_multitask
         self.celltypes_to_index = celltypes_to_index
-        self.num_celltypes = len(celltypes_to_index)
+        self.num_celltypes = len(celltypes_to_index) if celltypes_to_index else 0
+        self.celltype_model = celltype_model  # Separate cell type model for decoupled training
+        self.ablate_gene_expression = ablate_gene_expression
 
         self.has_genept = genept_embeddings is not None
         self.genept_embeddings = genept_embeddings
@@ -103,8 +182,8 @@ class GNN(torch.nn.Module):
         else:
             raise Exception("'method' not recognized.")
 
-        # Cell-type branch GNN (only if predicting cell type)
-        if self.predict_celltype:
+        # Cell-type branch GNN (only if predicting cell type AND multitask training)
+        if self.predict_celltype and self.train_multitask:
             if self.method == "GCN":
                 self.ct_conv1 = GCNConv(input_dim, hidden_channels)
                 self.ct_convs = ModuleList([GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)])
@@ -139,6 +218,24 @@ class GNN(torch.nn.Module):
                 ReLU(),
                 Linear(hidden_channels, output_dim)
             )
+        elif self.predict_celltype and not self.train_multitask:
+
+            expr_head_in_dim = hidden_channels + inject_dim + self.num_celltypes
+            self.expr_mlp = Sequential(
+                Linear(expr_head_in_dim, hidden_channels),
+                ReLU(),
+                Linear(hidden_channels, output_dim)
+            )
+
+        # Ablation mode: MLP that only uses cell type (no gene expression or graph)
+        if self.ablate_gene_expression:
+            assert self.predict_celltype, "ablate_gene_expression requires predict_celltype=True"
+            ablation_in_dim = self.num_celltypes + inject_dim
+            self.ablation_mlp = Sequential(
+                Linear(ablation_in_dim, hidden_channels),
+                ReLU(),
+                Linear(hidden_channels, output_dim)
+            )
 
 
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
@@ -166,7 +263,6 @@ class GNN(torch.nn.Module):
         self._genept_cache_ready = True
 
         return emb_matrix
-
 
     def _compute_genept_weighted_embedding(self, x, gene_names, device=None):
         if not self._genept_cache_ready:
@@ -209,6 +305,9 @@ class GNN(torch.nn.Module):
     def forward_celltype(self, x, edge_index, batch):
         """Return only cell-type logits (no expression)."""
         assert self.predict_celltype, "Celltype branch not enabled"
+        
+        if not self.train_multitask and self.celltype_model is not None:
+            return self.celltype_model(x, edge_index, batch)
 
         ct_h = self.ct_conv1(x, edge_index)
         ct_h = F.relu(ct_h)
@@ -233,6 +332,22 @@ class GNN(torch.nn.Module):
         allow_grad_through_ct=False,
     ):
         """Expression prediction, optionally conditioned on celltype logits."""
+        # Ablation mode: skip gene expression backbone, use only cell type
+        if self.ablate_gene_expression:
+            assert center_celltype is not None, "center_celltype must be provided when ablate_gene_expression=True"
+            # Use oracle cell type (one-hot encoding)
+            ct_idx = torch.tensor(center_celltype, device=x.device, dtype=torch.long)
+            celltype_features = F.one_hot(ct_idx, num_classes=self.num_celltypes).float()
+            
+            # Only use cell type features (and optional inject)
+            fused = celltype_features
+            if inject is not None:
+                fused = torch.cat([fused, inject], dim=1)
+            
+            expr_out = self.ablation_mlp(fused)
+            return expr_out
+        
+        # Normal mode: use gene expression backbone
         expr_pooled = self._forward_expr_backbone(x, edge_index, batch, gene_names=gene_names)
 
         if not self.predict_celltype:
@@ -250,9 +365,7 @@ class GNN(torch.nn.Module):
                 # multitask: soft distribution, gradients flow back into ct branch
                 celltype_features = F.softmax(ct_logits, dim=1)
             else:
-                # decoupled: hard argmax, detached one-hot
-                hard_ct_pred = torch.argmax(ct_logits, dim=1)
-                celltype_features = F.one_hot(hard_ct_pred, num_classes=self.num_celltypes).float().detach()
+                celltype_features = F.softmax(ct_logits, dim=1)
 
         fused = torch.cat([expr_pooled, celltype_features], dim=1)
         if inject is not None:
@@ -273,6 +386,24 @@ class GNN(torch.nn.Module):
         allow_grad_through_ct=False,
     ):
         """Wrapper that returns (expr_out, ct_logits) when predict_celltype=True, otherwise only expr_out"""
+        # Ablation mode: skip all gene expression processing
+        if self.ablate_gene_expression:
+            assert center_celltype is not None, "center_celltype must be provided when ablate_gene_expression=True"
+            # Create dummy cell type logits (one-hot) for consistency
+            ct_logits = F.one_hot(torch.tensor(center_celltype, device=x.device, dtype=torch.long), num_classes=self.num_celltypes).float()
+            expr_out = self.forward_expression(
+                x=x,
+                edge_index=edge_index,
+                batch=batch,
+                inject=inject,
+                gene_names=gene_names,
+                use_oracle_ct=True,  # Always use oracle in ablation mode
+                center_celltype=center_celltype,
+                ct_logits=None,
+                allow_grad_through_ct=False,
+            )
+            return expr_out, ct_logits
+        
         if not self.predict_celltype:
             expr_out = self.forward_expression(
                 x=x,
@@ -280,14 +411,21 @@ class GNN(torch.nn.Module):
                 batch=batch,
                 inject=inject,
                 gene_names=gene_names,
-                use_oracle_ct=False,
-                center_celltype=None,
+                use_oracle_ct=use_oracle_ct,
+                center_celltype=center_celltype,
                 ct_logits=None,
-                allow_grad_through_ct=False,
+                allow_grad_through_ct=allow_grad_through_ct,
             )
             return expr_out
 
-        ct_logits = self.forward_celltype(x, edge_index, batch)
+        if not use_oracle_ct and not self.train_multitask:
+            with torch.no_grad():
+                ct_logits = self.forward_celltype(x, edge_index, batch)
+        elif not use_oracle_ct and self.train_multitask:
+            ct_logits = self.forward_celltype(x, edge_index, batch)
+        elif use_oracle_ct:
+            ct_logits = F.one_hot(torch.tensor(center_celltype, device=x.device, dtype=torch.long), num_classes=self.num_celltypes).float()
+        
         expr_out = self.forward_expression(
             x=x,
             edge_index=edge_index,
@@ -423,21 +561,56 @@ def _get_expression_params(model):
         tuple: (list of parameters, set of parameter IDs)
     """
     expr_params = []
-    if hasattr(model, 'conv1'):
-        expr_params.extend(list(model.conv1.parameters()))
-    if hasattr(model, 'convs'):
-        for conv in model.convs:
-            expr_params.extend(list(conv.parameters()))
-    if hasattr(model, 'expr_mlp'):
-        expr_params.extend(list(model.expr_mlp.parameters()))
-    elif hasattr(model, 'lin_base'):
-        expr_params.extend(list(model.lin_base.parameters()))
-    # Also include GenePT-related parameters if they exist
-    for attr_name in ['q_proj', 'k_proj', 'genept_to_hidden', 'xattn', 'pre_attn_ln', 'post_attn_ln', 'fuse_gate']:
-        if hasattr(model, attr_name):
-            expr_params.extend(list(getattr(model, attr_name).parameters()))
+    # In ablation mode, only include ablation MLP
+    if hasattr(model, 'ablate_gene_expression') and model.ablate_gene_expression:
+        if hasattr(model, 'ablation_mlp'):
+            expr_params.extend(list(model.ablation_mlp.parameters()))
+    else:
+        # Normal mode: include GNN backbone and expression head
+        if hasattr(model, 'conv1'):
+            expr_params.extend(list(model.conv1.parameters()))
+        if hasattr(model, 'convs'):
+            for conv in model.convs:
+                expr_params.extend(list(conv.parameters()))
+        if hasattr(model, 'expr_mlp'):
+            expr_params.extend(list(model.expr_mlp.parameters()))
+        elif hasattr(model, 'lin_base'):
+            expr_params.extend(list(model.lin_base.parameters()))
+        # Also include GenePT-related parameters if they exist
+        for attr_name in ['q_proj', 'k_proj', 'genept_to_hidden', 'xattn', 'pre_attn_ln', 'post_attn_ln', 'fuse_gate']:
+            if hasattr(model, attr_name):
+                expr_params.extend(list(getattr(model, attr_name).parameters()))
     expr_param_ids = {id(p) for p in expr_params}
     return expr_params, expr_param_ids
+
+
+def train_celltype_model(
+    celltype_model,
+    loader,
+    class_weights=None,
+    device="cuda",
+    epochs=1,
+):
+    """
+    Train a separate cell type model independently.
+    Used in decoupled training mode.
+    """
+    celltype_model.train()
+    optimizer = torch.optim.Adam(celltype_model.parameters(), lr=1e-3)
+    
+    for epoch in range(epochs):
+        for batch in loader:
+            batch = batch.to(device)
+            center_celltypes = [celltype_model.celltypes_to_index[item[0]] for item in batch.center_celltype]
+            center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
+            
+            optimizer.zero_grad(set_to_none=True)
+            ct_logits = celltype_model(batch.x, batch.edge_index, batch.batch)
+            ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
+            ct_loss.backward()
+            optimizer.step()
+    
+    return celltype_model
 
 
 def train(
@@ -445,12 +618,12 @@ def train(
     loader,
     criterion,
     expr_optimizer,
-    ct_optimizer=None,
     gene_names=None,
     inject=False,
     device="cuda",
     celltype_weight=1.0,
     class_weights=None,
+    use_oracle_ct=False,
 ):
     model.train()
 
@@ -470,8 +643,8 @@ def train(
                 batch=batch.batch,
                 inject=(batch.inject if inject else None),
                 gene_names=gene_names,
-                use_oracle_ct=False,
-                center_celltype=None,
+                use_oracle_ct=use_oracle_ct,
+                center_celltype=center_celltypes,
                 allow_grad_through_ct=True,
             )
 
@@ -482,19 +655,16 @@ def train(
             expr_optimizer.step()
             continue
 
-        # Case 2: two-step decoupled training
+        # Case 2: decoupled training - expression only (cell type model already trained separately)
         if model.predict_celltype and not model.train_multitask:
-            # ct step (only ct optimizer, only ct params)
-            ct_optimizer.zero_grad(set_to_none=True)
-            ct_logits = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
-            ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
-            ct_loss.backward()
-            ct_optimizer.step()
-
-            # Expression step (only expr optimizer, celltype treated as fixed)
+            # Cell type predictions come from pre-trained celltype_model
             expr_optimizer.zero_grad(set_to_none=True)
-            with torch.no_grad():
-                ct_logits_detached = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
+            
+            if not use_oracle_ct:
+                with torch.no_grad():
+                    ct_logits = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
+            else:
+                ct_logits = None
 
             expr_out = model.forward_expression(
                 x=batch.x,
@@ -502,9 +672,9 @@ def train(
                 batch=batch.batch,
                 inject=(batch.inject if inject else None),
                 gene_names=gene_names,
-                use_oracle_ct=False,
-                center_celltype=None,
-                ct_logits=ct_logits_detached,
+                use_oracle_ct=use_oracle_ct,    
+                center_celltype=center_celltypes,
+                ct_logits=ct_logits,
                 allow_grad_through_ct=False,   # ensures no accidental graph links
             )
             expr_loss = criterion(expr_out, batch.y)
@@ -521,7 +691,7 @@ def train(
             inject=(batch.inject if inject else None),
             gene_names=gene_names,
             ct_logits=None,
-            use_oracle_ct=False,
+            use_oracle_ct=use_oracle_ct,
         )
         loss = criterion(out, batch.y)
         loss.backward()
@@ -536,6 +706,7 @@ def test(
     gene_names=None, 
     inject=False, 
     device="cuda",
+    use_oracle_ct=False,
 ):
     model.eval()
     errors = []
@@ -556,7 +727,8 @@ def test(
             'batch': batch.batch,
             'inject': batch.inject if inject else None,
             'gene_names': gene_names,
-            'use_oracle_ct': False,
+            'use_oracle_ct': use_oracle_ct,
+            'center_celltype': center_celltypes,
         }
         
         forward_output = model(**forward_args)

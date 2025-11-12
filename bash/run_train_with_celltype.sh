@@ -8,6 +8,8 @@ DEBUG=$6
 GPU=$7
 GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
+USE_ORACLE_CT=$8
+ABLATE_GENE_EXPRESSION=$9
 
 
 if [ "$PREDICT_CELLTYPE" = True ]; then
@@ -52,6 +54,21 @@ else
   EXP_NAME="${EXP_NAME}"
 fi
 
+if [ "$USE_ORACLE_CT" = True ]; then
+  USE_ORACLE_CT_FLAG="--use_oracle_ct"
+  EXP_NAME="${EXP_NAME}_oracle_ct"
+else
+  USE_ORACLE_CT_FLAG=""
+  EXP_NAME="${EXP_NAME}"
+fi
+
+if [ "$ABLATE_GENE_EXPRESSION" = True ]; then
+  ABLATE_GENE_EXPRESSION_FLAG="--ablate_gene_expression"
+  EXP_NAME="${EXP_NAME}_ablate_gene_expression"
+else
+  ABLATE_GENE_EXPRESSION_FLAG=""
+  EXP_NAME="${EXP_NAME}"
+fi
 echo "EXP_NAME: $EXP_NAME"
 
 
@@ -68,8 +85,10 @@ CUDA_VISIBLE_DEVICES="$GPU" python $BASE/src/spatial_gnn/scripts/train_gnn_with_
       --epochs $EPOCHS \
       --exp_name "${EXP_NAME}" \
       --do_eval \
+      $USE_ORACLE_CT_FLAG \
       $GENEPT_STRATEGY_FLAG \
       $GENEPT_EMBEDDINGS_FLAG \
       $TRAIN_MULTITASK_FLAG \
       $PREDICT_CELLTYPE_FLAG \
-      $DEBUG_FLAG
+      $DEBUG_FLAG \
+      $ABLATE_GENE_EXPRESSION_FLAG
