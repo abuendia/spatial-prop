@@ -160,7 +160,7 @@ def load_model_from_path(model_path: str, device: str) -> torch.nn.Module:
     """
     # Get the model directory and config path
     model_dir = os.path.dirname(model_path)
-    config_path = os.path.join(model_dir, "model_config.json")
+    config_path = os.path.join(model_dir, "config.json")
     
     if not os.path.exists(config_path):
         raise FileNotFoundError(

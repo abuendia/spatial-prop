@@ -7,10 +7,10 @@ import pickle
 # --- Optional: your normalization map (edit as needed) ---
 
 datasets = [
-    "aging_coronal_expression", "aging_sagittal_expression",
-    "androvic_expression", "exercise_expression", "kukanja_expression",
-    "pilot_expression",
-    "reprogramming_expression", "zeng_expression"
+    "aging_coronal", "aging_sagittal",
+    "androvic", "exercise", "kukanja",
+    "pilot",
+    "reprogramming", "zeng"
 ]
 
 
@@ -119,7 +119,7 @@ def plot_spearman_heatmap(
 def get_spearman_dict(datasets):
     spearman_dict = {}
     for dataset in datasets:
-        celltype_results = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/xattn/results/gnn/{dataset}_2hop_2augment_expression_none/weightedl1_1en04_GenePT_all_genes/test_evaluation_stats_bycelltype.pkl"
+        celltype_results = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/base_model/results/gnn/{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04_GenePT_all_genes/test_evaluation_stats_bycelltype.pkl"
         with open(celltype_results, "rb") as f:
             celltype_results = pickle.load(f)
         celltype_results = {k: v["Cell - Spearman (mean)"] for k, v in celltype_results.items()}
@@ -131,6 +131,12 @@ def get_spearman_dict(datasets):
 
 spearman_dict = get_spearman_dict(datasets)
 plot_spearman_heatmap(spearman_dict)
-plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/plots/celltype_heatmap.jpg", bbox_inches="tight", dpi=300)
+
+
+
+import matplotlib 
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
+plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/viz/output/celltype_heatmap.pdf", format="pdf")
 #plt.close()
 # %%

@@ -13,10 +13,11 @@ import os
 import tqdm 
 
 
-from spatial_gnn.scripts.train_gnn_model_expression import train_model_from_scratch
+from spatial_gnn.scripts.train_gnn_with_celltype import train_model_from_scratch
 from spatial_gnn.utils.dataset_utils import load_model_from_path
 from spatial_gnn.models.gnn_model import predict
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.utils.dataset_utils import get_dataset_config
 
 
 def create_perturbation_mask(
@@ -44,17 +45,19 @@ def create_perturbation_mask(
     str
         Path to the saved AnnData file with perturbation mask
     """
+    perturbed_adata = adata.copy()
+
     # Create perturbation mask
-    perturbed = np.ones((adata.shape[0], adata.shape[1]))
+    perturbed = np.ones((perturbed_adata.shape[0], perturbed_adata.shape[1]))
     
     # Check if celltype column exists
-    if 'celltype' not in adata.obs.columns:
+    if 'celltype' not in perturbed_adata.obs.columns:
         raise ValueError("AnnData object must have 'celltype' column in obs")
     
     # Apply perturbations for each cell type
     for cell_type, gene_multipliers in perturbation_dict.items():
         # Find cells of this type
-        cell_mask = adata.obs['celltype'] == cell_type
+        cell_mask = perturbed_adata.obs['celltype'] == cell_type
         cell_indices = np.where(cell_mask)[0]
         
         if len(cell_indices) == 0:
@@ -65,9 +68,9 @@ def create_perturbation_mask(
         
         # Apply gene-specific multipliers
         for gene_name, multiplier in gene_multipliers.items():
-            if gene_name in adata.var_names:
-                gene_idx = adata.var_names.get_loc(gene_name)
-                vals = adata.X[cell_indices, gene_idx]
+            if gene_name in perturbed_adata.var_names:
+                gene_idx = perturbed_adata.var_names.get_loc(gene_name)
+                vals = perturbed_adata.X[cell_indices, gene_idx]
                 if issparse(vals): 
                     vals = vals.A.ravel()
                 else: 
@@ -78,25 +81,25 @@ def create_perturbation_mask(
                 print(f"Warning: Gene '{gene_name}' not found in data")
     
     # Add the perturbation mask to the AnnData
-    adata.obsm[mask_key] = perturbed
+    perturbed_adata.obsm[mask_key] = perturbed
     
     # Save to file if path is provided
     if save_path is not None:
-        adata.write(save_path)
+        perturbed_adata.write(save_path)
         print(f"Saved AnnData with perturbation mask to: {save_path}")
     
     # Store metadata about the perturbation
     perturbation_info = {
         'cell_types': list(perturbation_dict.keys()),
-        'n_perturbed_cells': sum(len(np.where(adata.obs['celltype'] == ct)[0]) 
+        'n_perturbed_cells': sum(len(np.where(perturbed_adata.obs['celltype'] == ct)[0]) 
                                 for ct in perturbation_dict.keys()),
         'perturbed_genes': list(set(gene for genes in perturbation_dict.values() 
                                    for gene in genes.keys()))
     }
-    adata.uns['perturbation_info'] = perturbation_info
+    perturbed_adata.uns['perturbation_info'] = perturbation_info
     
     print(f"\nPerturbation mask created:")
-    print(f"- Shape: {perturbed.shape}")
+    print(f"- Shape: {perturbed_adata.shape}")
     print(f"- Cell types affected: {perturbation_info['cell_types']}")
     print(f"- Cells affected: {perturbation_info['n_perturbed_cells']}")
     print(f"- Genes affected: {perturbation_info['perturbed_genes']}")
@@ -232,56 +235,46 @@ def predict_perturbation_effects(
         - adata.layers['perturbation_effects']: Predicted perturbation effects
         - adata.obsm[perturbation_mask_key]: Applied perturbation mask
     """
-    # Validate inputs
-    if not isinstance(adata_path, str):
-        raise TypeError("adata_path must be a string")
-    if not isinstance(model_path, str):
-        raise TypeError("model_path must be a string")
-    if not isinstance(perturbation_dict, dict):
-        raise TypeError("perturbation_dict must be a dictionary")
-        
     # Load the pretrained model
+    test_adata = sc.read_h5ad(adata_path)
+
     model, model_config = load_model_from_path(model_path, device)
     print(f"Loaded pretrained model from: {model_path}")
     
-    # Load the test data
-    adata = sc.read_h5ad(adata_path)
-    
-    # Create perturbation mask and apply it to the data
-    print("Creating perturbation mask...")
-    create_perturbation_mask(adata, perturbation_dict, mask_key=perturbation_mask_key, save_path=adata_path)
+    dataset = "aging_coronal"
+    base_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw"
+    _, file_path, _, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
     
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
-    inference_dataset = SpatialAgingCellDataset(
+    test_dataset = SpatialAgingCellDataset(
         subfolder_name="predict",
         dataset_prefix=exp_name,
         target="expression",
-        k_hop=model_config["k_hop"],
-        augment_hop=model_config["augment_hop"],
-        node_feature=model_config["node_feature"],
-        inject_feature=model_config["inject_feature"],
-        num_cells_per_ct_id=model_config["num_cells_per_ct_id"],
-        center_celltypes=model_config["center_celltypes"],
-        use_ids=model_config.get("test_ids", None),
+        k_hop=2,
+        augment_hop=2,
+        node_feature="expression",
+        inject_feature=None,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        use_ids=test_ids,
         raw_filepaths=[adata_path],
-        celltypes_to_index=model_config["celltypes_to_index"],
-        normalize_total=model_config["normalize_total"],
-        perturbation_mask_key=perturbation_mask_key
+        gene_list=None,
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        debug=False,
+        overwrite=False,
+        use_mp=False,
     )
-    inference_dataset.process()
-    
-    # Load batch files the same way as training
-    all_inference_data = []
-    for f in tqdm.tqdm(inference_dataset.processed_file_names):
-        batch_list = torch.load(os.path.join(inference_dataset.processed_dir, f), weights_only=False)
-        all_inference_data.extend(batch_list)
+    test_dataset.process()
 
-    inference_dataloader = DataLoader(all_inference_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
-    print(f"Created {len(all_inference_data)} batch files from input data")
+    all_test_data = []
+    for idx, f in tqdm.tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
+        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
+        all_test_data.extend(batch_list)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
-    # Run model predict function
-    adata_result = predict(model, inference_dataloader, adata, device)
+    adata_result = predict(model, test_loader, test_adata, device)
     print("Perturbation prediction completed successfully!")
     return adata_result
 
@@ -323,38 +316,22 @@ def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
 
 
 if __name__ == "__main__":
-    train_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
-    test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"  # Using same data for demo
-    
-    print("=== Training a new perturbation model ===")
-    model, model_config, model_path = train_perturbation_model(
-        adata_path=train_data_path,
-        exp_name="api_run",
-        k_hop=2,
-        augment_hop=2,
-        center_celltypes="T cell,NSC,Pericyte",
-        node_feature="expression",
-        inject_feature="None",
-        num_cells_per_ct_id=100,
-        epochs=50,
-    )
-    
-    # Define perturbations
+    test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad" 
+    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/base_model/results/gnn/aging_coronal_expression_2hop_2augment_expression_none/weightedl1_1en04_GenePT_all_genes/best_model.pth"
+    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/perturbed_adata/aging_coronal_perturbed.h5ad"
+
+    # Il6, Tnf, Ifng
     perturbation_dict = {
-        'T cell': {'Igf2': 0.0},  
-        'NSC': {'Sox9': 2.0},         
-        'Pericyte': {'Ccl4': 0.5}    
+        'T cell': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},    
+        'Microglia': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},          
     }
-    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/gnn/api_run_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_TNP_NoneInject/DEBUG_weightedl1_1en04/best_model.pth"
-
-
-    test_adata = sc.read_h5ad(test_data_path)
-    test_data_path_perturbed = create_perturbation_mask(test_adata, perturbation_dict, save_path=test_data_path)
+    # test_adata = sc.read_h5ad(test_data_path)
+    # save_path = create_perturbation_mask(test_adata, perturbation_dict, save_path=save_path)
 
     print("\n=== Predicting perturbation effects ===")
     adata_perturbed = predict_perturbation_effects(
-        adata_path=test_data_path_perturbed,
-        exp_name="api_run",
+        adata_path=save_path,
+        exp_name="aging_coronal_perturbed",
         model_path=model_path,
         perturbation_dict=perturbation_dict,
         perturbation_mask_key="perturbed_input"

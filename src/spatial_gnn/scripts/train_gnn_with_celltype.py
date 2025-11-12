@@ -49,6 +49,7 @@ def train_model_from_scratch(
     train_multitask: bool = False,
     use_oracle_ct: bool = False,
     ablate_gene_expression: bool = False,
+    use_one_hot_ct: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -105,6 +106,8 @@ def train_model_from_scratch(
         Whether to train a multitask model
     use_oracle_ct : bool, default=False
         Whether to use oracle cell type for cell type prediction
+    use_one_hot_ct : bool, default=False
+        Whether to use one-hot encoding for cell type prediction
     Returns
     -------
     Tuple[GNN, str]
@@ -241,6 +244,10 @@ def train_model_from_scratch(
         class_weights = torch.tensor(class_weights, device=device)
         
         print(f"Training cell type model for {epochs} epochs...")
+        best_accuracy = 0.0
+        patience = 5
+        epochs_without_improvement = 0
+        
         for epoch in range(1, epochs + 1):
             train_celltype_model(
                 celltype_model,
@@ -265,6 +272,23 @@ def train_model_from_scratch(
             ct_accuracy = compute_celltype_accuracy(all_ct_preds, np.array(all_ct_targets))
 
             print(f"Cell type model - Epoch: {epoch:03d}, Test Celltype Accuracy: {ct_accuracy:.4f}", flush=True)
+            
+            # Early stopping logic
+            if ct_accuracy > best_accuracy:
+                best_accuracy = ct_accuracy
+                epochs_without_improvement = 0
+                # Save best model
+                best_model_path = os.path.join(model_save_dir, "celltype_model_best.pth")
+                torch.save(celltype_model.state_dict(), best_model_path)
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= patience:
+                    print(f"Early stopping: No improvement for {patience} epochs. Best accuracy: {best_accuracy:.4f}", flush=True)
+                    # Load best model
+                    best_model_path = os.path.join(model_save_dir, "celltype_model_best.pth")
+                    celltype_model.load_state_dict(torch.load(best_model_path))
+                    break
+            
             celltype_model.train()
         
         celltype_model_path = os.path.join(model_save_dir, "celltype_model.pth")
@@ -287,7 +311,8 @@ def train_model_from_scratch(
         predict_celltype=predict_celltype,
         train_multitask=train_multitask,
         celltype_model=celltype_model,  # Pass pre-trained model for decoupled training
-        ablate_gene_expression=ablate_gene_expression
+        ablate_gene_expression=ablate_gene_expression,
+        use_one_hot_ct=use_one_hot_ct,
     )
     model.to(device)
     print(f"Expression model initialized on {device}")
@@ -339,10 +364,12 @@ def train_model_from_scratch(
     best_score = np.inf
     training_results = {"metric": loss, "epoch": [], "train": [], "test": [], "test_spearman": [], "test_celltype_accuracy": []}
 
+    is_last_epoch = False
     for epoch in range(1, epochs + 1):
+        is_last_epoch = epoch == epochs
         train(model, train_loader, criterion, expr_optimizer, gene_names=gene_names, inject=inject, device=device, celltype_weight=1.0, class_weights=class_weights, use_oracle_ct=use_oracle_ct)
         train_score, _, _ = test(model, train_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device, use_oracle_ct=use_oracle_ct)
-        test_score, test_spearman, test_celltype_accuracy = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device, use_oracle_ct=use_oracle_ct)
+        test_score, test_spearman, test_celltype_accuracy = test(model, test_loader, loss, criterion, gene_names=gene_names, inject=inject, device=device, use_oracle_ct=use_oracle_ct, is_last_epoch=is_last_epoch, save_dir=model_save_dir, gene_list=test_dataset.gene_names)
 
         if test_score < best_score:
             save_dir = model_save_dir
@@ -443,6 +470,7 @@ def main():
     parser.add_argument("--train_multitask", action='store_true', help="Enable training a multitask model")
     parser.add_argument("--use_oracle_ct", action='store_true', help="Use oracle cell type for cell type prediction")
     parser.add_argument("--ablate_gene_expression", action='store_true', help="Ablate gene expression for expression prediction")
+    parser.add_argument("--use_one_hot_ct", action='store_true', help="Use one-hot encoding for cell type prediction")
 
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
@@ -515,6 +543,7 @@ def main():
         train_multitask=args.train_multitask,
         use_oracle_ct=args.use_oracle_ct,
         ablate_gene_expression=args.ablate_gene_expression,
+        use_one_hot_ct=args.use_one_hot_ct,
     )
 
     if args.do_eval:

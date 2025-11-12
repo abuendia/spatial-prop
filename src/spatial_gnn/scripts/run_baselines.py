@@ -133,11 +133,11 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     
     print("Running k-hop baseline...", flush=True)
-    eval_model(None, test_loader, save_dir, "khop_mean")
+    # eval_model(None, test_loader, save_dir, "khop_mean")
     # print("Running center cell type baseline...", flush=True)
     # eval_model(None, test_loader, save_dir, "khop_celltype_mean")
-    #print("Running global baseline...", flush=True)
-    # eval_model(train_loader, test_loader, save_dir, "global_mean")
+    print("Running global baseline...", flush=True)
+    eval_model(train_loader, test_loader, save_dir, "global_mean")
 
 
 def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"):

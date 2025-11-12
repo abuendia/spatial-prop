@@ -10,6 +10,7 @@ GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 USE_ORACLE_CT=$8
 ABLATE_GENE_EXPRESSION=$9
+USE_ONE_HOT_CT=${10}
 
 
 if [ "$PREDICT_CELLTYPE" = True ]; then
@@ -69,6 +70,15 @@ else
   ABLATE_GENE_EXPRESSION_FLAG=""
   EXP_NAME="${EXP_NAME}"
 fi
+
+if [ "$USE_ONE_HOT_CT" = True ]; then
+  USE_ONE_HOT_CT_FLAG="--use_one_hot_ct"
+  EXP_NAME="${EXP_NAME}_one_hot_ct"
+else
+  USE_ONE_HOT_CT_FLAG=""
+  EXP_NAME="${EXP_NAME}_softmax_ct"
+fi
+
 echo "EXP_NAME: $EXP_NAME"
 
 
@@ -91,4 +101,6 @@ CUDA_VISIBLE_DEVICES="$GPU" python $BASE/src/spatial_gnn/scripts/train_gnn_with_
       $TRAIN_MULTITASK_FLAG \
       $PREDICT_CELLTYPE_FLAG \
       $DEBUG_FLAG \
-      $ABLATE_GENE_EXPRESSION_FLAG
+      $ABLATE_GENE_EXPRESSION_FLAG \
+      $USE_ONE_HOT_CT_FLAG \
+      --log_to_terminal

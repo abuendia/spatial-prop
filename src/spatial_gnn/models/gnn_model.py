@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.sparse import issparse
-import time
 from tqdm import tqdm
+import os
+import pandas as pd
 
 import torch
 from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
@@ -105,6 +106,7 @@ class GNN(torch.nn.Module):
         train_multitask=False,
         celltype_model=None,
         ablate_gene_expression=False,
+        use_one_hot_ct=False,
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -118,6 +120,7 @@ class GNN(torch.nn.Module):
         self.num_celltypes = len(celltypes_to_index) if celltypes_to_index else 0
         self.celltype_model = celltype_model  # Separate cell type model for decoupled training
         self.ablate_gene_expression = ablate_gene_expression
+        self.use_one_hot_ct = use_one_hot_ct
 
         self.has_genept = genept_embeddings is not None
         self.genept_embeddings = genept_embeddings
@@ -365,7 +368,10 @@ class GNN(torch.nn.Module):
                 # multitask: soft distribution, gradients flow back into ct branch
                 celltype_features = F.softmax(ct_logits, dim=1)
             else:
-                celltype_features = F.softmax(ct_logits, dim=1)
+                if self.use_one_hot_ct:
+                    celltype_features = F.one_hot(torch.argmax(ct_logits, dim=1), num_classes=self.num_celltypes).float()
+                else: 
+                    celltype_features = F.softmax(ct_logits, dim=1)
 
         fused = torch.cat([expr_pooled, celltype_features], dim=1)
         if inject is not None:
@@ -707,11 +713,15 @@ def test(
     inject=False, 
     device="cuda",
     use_oracle_ct=False,
+    is_last_epoch=False,
+    save_dir=None,
+    gene_list=None,
 ):
     model.eval()
     errors = []
     all_preds = []
     all_targets = []
+    all_center_ct_strings = []
 
     all_ct_preds = []
     all_ct_targets = []
@@ -720,6 +730,7 @@ def test(
         batch.to(device)
         
         center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
+        center_ct_strings = [item[0] for item in batch.center_celltype]
         # Prepare arguments for forward pass
         forward_args = {
             'x': batch.x,
@@ -745,6 +756,7 @@ def test(
 
         all_preds.append(expr_out.detach().cpu().numpy())
         all_targets.append(target.detach().cpu().numpy())
+        all_center_ct_strings.extend(center_ct_strings)
         
         if loss == "mse":
             errors.append(F.mse_loss(expr_out, target).sqrt().item())
@@ -759,11 +771,31 @@ def test(
 
     all_preds = np.concatenate(all_preds)
     all_targets = np.concatenate(all_targets)
+    all_ct_targets = np.concatenate(all_ct_targets)
+    all_center_ct_strings = np.array(all_center_ct_strings)
     spearman = compute_spearman(all_preds, all_targets)
 
+    # if last epoch save the predictions and targets to file 
+    if is_last_epoch:        
+        n_cells = all_preds.shape[0]
+        n_genes = all_preds.shape[1]
+        cell_idx = np.repeat(np.arange(n_cells), n_genes)
+        gene_names = np.tile(gene_list, n_cells)
+        pred_expr = all_preds.flatten()
+        true_expr = all_targets.flatten()
+        cell_type = np.repeat(all_center_ct_strings, n_genes)
+        
+        df = pd.DataFrame({
+            'cell_idx': cell_idx,
+            'cell_type': cell_type,
+            'gene_name': gene_names,
+            'pred_expr': pred_expr,
+            'true_expr': true_expr,
+        })
+        df.to_csv(os.path.join(save_dir, "last_epoch_preds.csv"), index=False)
+        
     if model.predict_celltype:
         all_ct_preds = torch.cat(all_ct_preds, dim=0)
-        all_ct_targets = np.concatenate(all_ct_targets)
         celltype_accuracy = compute_celltype_accuracy(all_ct_preds, all_ct_targets)
         return np.mean(errors), spearman, celltype_accuracy
     else:
