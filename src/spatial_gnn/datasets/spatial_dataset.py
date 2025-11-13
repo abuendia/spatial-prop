@@ -240,7 +240,7 @@ class SpatialAgingCellDataset(Dataset):
                 sub_ids_arr = np.intersect1d(np.unique(adata.obs[self.sub_id]), np.array(self.use_ids))
             
             if self.debug:
-                sub_ids_arr = sub_ids_arr[:2]
+                sub_ids_arr = sub_ids_arr[:1]
             
             print(f"  Processing {len(sub_ids_arr)} samples")
             
@@ -332,30 +332,29 @@ class SpatialAgingCellDataset(Dataset):
         ### Construct Node Labels
         if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
             raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
-        
-        # Check if perturbation mask exists and use it for expression features
-        use_perturbation_expression = self.perturbation_mask_key in sub_adata.obsm.keys()
-        
+                
         if "celltype" in self.node_feature:
             # get cell type one hot encoding
             node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
             node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
+
+        # Check if perturbation mask exists and use it for expression features
+        use_perturbation_expression = self.perturbation_mask_key in sub_adata.obsm.keys()
+        if use_perturbation_expression:
+            print(f"Using perturbation expression in {self.perturbation_mask_key} key")
         
         if "expression" in self.node_feature:
             # get spatial expression - use perturbation mask if available
             if use_perturbation_expression:
                 # Use perturbation mask values instead of original expression
-                perturbation_expression = sub_adata.obsm[self.perturbation_mask_key]
+                node_labels = sub_adata.obsm[self.perturbation_mask_key]
                 
                 # Reshape to match gene dimensions if needed
-                if len(perturbation_expression.shape) == 1:
+                if len(node_labels.shape) == 1:
                     # Single value per cell, expand to match gene dimensions
-                    perturbation_expression = np.tile(perturbation_expression[:, np.newaxis], (1, sub_adata.shape[1]))
+                    node_labels = np.tile(node_labels[:, np.newaxis], (1, sub_adata.shape[1]))
                 
-                if self.node_feature == "expression":
-                    node_labels = torch.tensor(perturbation_expression).float()
-                else:
-                    node_labels = torch.cat((node_labels, torch.tensor(perturbation_expression).float()), 1).float()
+                node_labels = torch.tensor(node_labels).float()
             else:
                 # Use original expression values
                 if self.node_feature == "expression":

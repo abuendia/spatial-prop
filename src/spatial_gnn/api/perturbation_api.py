@@ -20,93 +20,60 @@ from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config
 
 
-def create_perturbation_mask(
+def create_perturbation_input_matrix(
     adata: ad.AnnData,
     perturbation_dict: Dict[str, Dict[str, float]],
     mask_key: str = 'perturbed_input',
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    normalize_total: bool = True,
 ) -> str:
     """
-    Create a perturbation mask and save the AnnData with the mask to a file.
-    
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        Input AnnData object
-    perturbation_dict : Dict[str, Dict[str, float]]
-        Dictionary specifying perturbations
-    mask_key : str, default='perturbed_input'
-        Key to store the perturbation mask in adata.obsm
-    save_dir : Optional[str], default=None
-        Directory to save the file. If None, uses current working directory.
-        
-    Returns
-    -------
-    str
-        Path to the saved AnnData file with perturbation mask
+    Store a full perturbed expression matrix in adata.obsm[mask_key] with the same 
+    normalization as the training data.
     """
     perturbed_adata = adata.copy()
 
-    # Create perturbation mask
-    perturbed = np.ones((perturbed_adata.shape[0], perturbed_adata.shape[1]))
-    
-    # Check if celltype column exists
-    if 'celltype' not in perturbed_adata.obs.columns:
-        raise ValueError("AnnData object must have 'celltype' column in obs")
-    
-    # Apply perturbations for each cell type
+    X = perturbed_adata.X
+    if issparse(X):
+        X = X.toarray()
+    else:
+        X = np.asarray(X)
+
+    perturbed = X.copy()   # start from normalized expression
+
     for cell_type, gene_multipliers in perturbation_dict.items():
-        # Find cells of this type
         cell_mask = perturbed_adata.obs['celltype'] == cell_type
         cell_indices = np.where(cell_mask)[0]
-        
+
         if len(cell_indices) == 0:
             print(f"Warning: No cells found for cell type '{cell_type}'")
             continue
-            
+
         print(f"Applying perturbations to {len(cell_indices)} cells of type '{cell_type}'")
-        
-        # Apply gene-specific multipliers
+
         for gene_name, multiplier in gene_multipliers.items():
             if gene_name in perturbed_adata.var_names:
                 gene_idx = perturbed_adata.var_names.get_loc(gene_name)
-                vals = perturbed_adata.X[cell_indices, gene_idx]
-                if issparse(vals): 
-                    vals = vals.A.ravel()
-                else: 
-                    vals = np.asarray(vals).ravel()
-                perturbed[cell_indices, gene_idx] = multiplier * vals
+
+                # multiply existing expression by the factor
+                perturbed[cell_indices, gene_idx] *= multiplier
                 print(f"  - Gene '{gene_name}': multiplier = {multiplier}")
             else:
                 print(f"Warning: Gene '{gene_name}' not found in data")
-    
-    # Add the perturbation mask to the AnnData
-    perturbed_adata.obsm[mask_key] = perturbed
-    
-    # Save to file if path is provided
+
+    if normalize_total:
+        target_sum = X.shape[1]
+        row_sums = perturbed.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1  # avoid /0
+        perturbed = perturbed / row_sums * target_sum
+        perturbed_adata.obsm[mask_key] = perturbed
+
     if save_path is not None:
         perturbed_adata.write(save_path)
-        print(f"Saved AnnData with perturbation mask to: {save_path}")
-    
-    # Store metadata about the perturbation
-    perturbation_info = {
-        'cell_types': list(perturbation_dict.keys()),
-        'n_perturbed_cells': sum(len(np.where(perturbed_adata.obs['celltype'] == ct)[0]) 
-                                for ct in perturbation_dict.keys()),
-        'perturbed_genes': list(set(gene for genes in perturbation_dict.values() 
-                                   for gene in genes.keys()))
-    }
-    perturbed_adata.uns['perturbation_info'] = perturbation_info
-    
-    print(f"\nPerturbation mask created:")
-    print(f"- Shape: {perturbed_adata.shape}")
-    print(f"- Cell types affected: {perturbation_info['cell_types']}")
-    print(f"- Cells affected: {perturbation_info['n_perturbed_cells']}")
-    print(f"- Genes affected: {perturbation_info['perturbed_genes']}")
-    print(f"- Mask stored in adata.obsm['{mask_key}']")
-    
-    return save_path    
+        print(f"Saved AnnData with perturbation input to: {save_path}")
 
+    return save_path
+  
 
 def train_perturbation_model(
     adata_path: str,
@@ -197,8 +164,6 @@ def predict_perturbation_effects(
     adata_path: str,
     model_path: str,
     exp_name: str,
-    perturbation_dict: Dict[str, Dict[str, float]],
-    perturbation_mask_key: str = 'perturbed_input',
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     **kwargs
 ) -> ad.AnnData:
@@ -262,7 +227,7 @@ def predict_perturbation_effects(
         gene_list=None,
         celltypes_to_index=celltypes_to_index,
         normalize_total=True,
-        debug=False,
+        debug=True,
         overwrite=False,
         use_mp=False,
     )
@@ -325,15 +290,15 @@ if __name__ == "__main__":
         'T cell': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},    
         'Microglia': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},          
     }
-    # test_adata = sc.read_h5ad(test_data_path)
-    # save_path = create_perturbation_mask(test_adata, perturbation_dict, save_path=save_path)
+    test_adata = sc.read_h5ad(test_data_path)
+    save_path = create_perturbation_input_matrix(test_adata, perturbation_dict, save_path=save_path, normalize_total=True)
 
     print("\n=== Predicting perturbation effects ===")
     adata_perturbed = predict_perturbation_effects(
         adata_path=save_path,
-        exp_name="aging_coronal_perturbed",
+        exp_name="aging_coronal_perturbed_debug",
         model_path=model_path,
         perturbation_dict=perturbation_dict,
         perturbation_mask_key="perturbed_input"
     )
-    adata_perturbed.write("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed/aging_coronal_perturbed_result.h5ad")
+    adata_perturbed.write("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/perturbed_adata/aging_coronal_pred_on_perturbed.h5ad")

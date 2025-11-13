@@ -6,6 +6,7 @@ GPUS=(0 1 2 3)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/run_baselines.py
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot")
+BASELINE_TYPE="center_celltype_global_mean"
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 # ----------------
@@ -25,7 +26,7 @@ for dataset in "${DATASETS[@]}"; do
 
   {
     ts=$(date +%Y%m%d_%H%M%S)
-    log="$LOGDIR/baselines_updated_${dataset}_${ts}.log"
+    log="$LOGDIR/baselines_${BASELINE_TYPE}_${dataset}_${ts}.log"
     echo "[$(date +%T)] start $dataset on GPU $gpu -> $log"
 
     # Run and capture both stdout and stderr to the log file
@@ -38,6 +39,7 @@ for dataset in "${DATASETS[@]}"; do
       --center_celltypes "all" \
       --node_feature "expression" \
       --inject_feature "none" \
+      --baseline_type "$BASELINE_TYPE" \
       >"$log" 2>&1
 
     status=$?

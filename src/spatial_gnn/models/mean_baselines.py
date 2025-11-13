@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from typing import List
+from collections import defaultdict
 
 from torch_geometric.data import Data, Batch
 
@@ -109,36 +110,55 @@ def center_celltype_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
     return predictions
 
 
-def global_mean_baseline_batch(train_dataset, device="cuda") -> torch.Tensor:
+def global_mean_baseline_batch(train_loader, device="cuda") -> torch.Tensor:
     """
-    Global mean expression over ALL non-center cells across all batches/graphs.
-    Works whether each item is a single-graph Data or a multi-graph Batch.
+    Global mean expression over all cells across all batches/graphs.
     """
     sum_x = None
     total = 0
 
-    for batch in train_dataset:
-        batch = batch.to(device)
+    for batch in train_loader:
+        x = batch.x.to(device)  # (num_nodes, num_genes)
 
-        x = batch.x # (num_nodes, num_genes)
-        centers = batch.center_node # (batch_size,)
-
-        # lazily init accumulator on the right device/dtype
         if sum_x is None:
-            sum_x = torch.zeros(x.size(1), dtype=x.dtype, device=x.device) # (num_genes,)
+            sum_x = torch.zeros(x.size(1), dtype=x.dtype, device=device)
 
-        sum_x += x.sum(dim=0)                    # add all cells
-        if centers is not None:
-            centers = centers.to(x.device).long()
-            # subtract centers' contribution
-            sum_x -= x[centers].sum(dim=0)
-            total += x.size(0) - int(centers.numel())
-        else:
-            total += x.size(0)
+        sum_x += x.sum(dim=0)
+        total += x.size(0)
 
     if sum_x is None or total == 0:
-        # fallback
-        num_genes = train_dataset[0].x.size(1) if len(train_dataset) > 0 else 0
-        return torch.zeros(num_genes)
+        raise RuntimeError("global_mean_baseline_batch: no cells found in train_loader.")
 
     return sum_x / float(total)
+
+
+def center_celltype_global_mean_baseline_batch(train_loader, device="cuda") -> dict[int, torch.Tensor]:
+    """
+    Per-celltype global mean expression over all cells of that type across all batches/graphs.
+    """
+    sum_by_type: dict[int, torch.Tensor] = {}
+    count_by_type: dict[int, int] = defaultdict(int)
+
+    for batch in train_loader:
+        x = batch.x.to(device)  # (num_nodes, num_genes)
+        ct = batch.celltypes
+        celltypes = np.array([item for sublist in ct for item in sublist]) 
+
+        for ct_id in np.unique(celltypes):
+            mask = (celltypes == ct_id)
+            if mask.any():
+                ct_sum = x[mask].sum(dim=0)
+                if ct_id not in sum_by_type:
+                    sum_by_type[ct_id] = ct_sum
+                else:
+                    sum_by_type[ct_id] += ct_sum
+                count_by_type[ct_id] += int(mask.sum().item())
+
+    if not sum_by_type:
+        raise RuntimeError("center_celltype_global_mean_baseline_batch: no cells / celltypes found.")
+
+    means_by_type = {
+        ct_id_str: sum_vec / float(count_by_type[ct_id_str])
+        for ct_id_str, sum_vec in sum_by_type.items()
+    }
+    return means_by_type

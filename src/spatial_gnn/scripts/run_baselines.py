@@ -21,7 +21,12 @@ from scipy.stats import pearsonr, spearmanr
 from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch, center_celltype_mean_baseline_batch, global_mean_baseline_batch
+from spatial_gnn.models.mean_baselines import(
+    khop_mean_baseline_batch,
+    center_celltype_mean_baseline_batch,
+    global_mean_baseline_batch,
+    center_celltype_global_mean_baseline_batch,
+)
 
 
 def main():
@@ -35,6 +40,7 @@ def main():
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
+    parser.add_argument("--baseline_type", help="Baseline type to use", type=str, required=True)
     parser.add_argument("--debug", help="Enable debug mode with subset of data for quick testing", action="store_true")
     args = parser.parse_args()
 
@@ -56,6 +62,7 @@ def main():
     file_path = os.path.join(args.base_path, dataset_config['file_name'])
     k_hop = args.k_hop
     augment_hop = args.augment_hop
+    baseline_type = args.baseline_type
     
     # Handle center_celltypes
     center_celltypes = parse_center_celltypes(args.center_celltypes)
@@ -131,17 +138,10 @@ def main():
     
     save_dir = os.path.join("baselines",train_dataset.processed_dir.split("/")[-2])
     os.makedirs(save_dir, exist_ok=True)
-    
-    print("Running k-hop baseline...", flush=True)
-    # eval_model(None, test_loader, save_dir, "khop_mean")
-    # print("Running center cell type baseline...", flush=True)
-    # eval_model(None, test_loader, save_dir, "khop_celltype_mean")
-    print("Running global baseline...", flush=True)
-    eval_model(train_loader, test_loader, save_dir, "global_mean")
+    eval_model(train_loader, test_loader, save_dir, baseline_type)
 
 
 def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"):
-
     save_dir = os.path.join(save_dir, baseline_type)
     os.makedirs(save_dir, exist_ok=True)
 
@@ -152,42 +152,37 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
     actuals = []
     celltypes = []
     
+    # precompute training set baselines
     if baseline_type == "global_mean":
-        global_mean = global_mean_baseline_batch(train_loader)  # (num_genes,)
+        global_mean = global_mean_baseline_batch(train_loader)
+    elif baseline_type == "center_celltype_global_mean":
+        ct_to_mean = center_celltype_global_mean_baseline_batch(train_loader)
 
-        for data in tqdm(test_loader):
+    for data in tqdm(test_loader):
+        data = data.to(device)
+
+        if baseline_type == "global_mean":
             batch_size = len(data.center_node)
             out = global_mean.unsqueeze(0).repeat(batch_size, 1)  # [batch_size, num_genes]
-
-            preds.append(out)
-
-            if data.y.shape != out.shape:
-                actuals.append(torch.reshape(data.y.float(), out.shape))
-            else:
-                actuals.append(data.y.float())
-
-            celltypes = np.concatenate((celltypes, np.concatenate(data.center_celltype)))
+        elif baseline_type == "center_celltype_global_mean":
+            out = []
+            for c in np.concatenate(data.center_celltype):
+                out.append(ct_to_mean[c])
+            out = torch.stack(out)
+        elif baseline_type == "khop_mean":
+            out = khop_mean_baseline_batch(data) # [512, 300]
+        elif baseline_type == "khop_celltype_mean":
+            out = center_celltype_mean_baseline_batch(data) # [512, 300]   
+        else:
+            raise ValueError(f"Baseline type {baseline_type} not recognized!")
+            
+        preds.append(out)
+        if data.y.shape != out.shape:
+            actuals.append(torch.reshape(data.y.float(), out.shape))
+        else:
+            actuals.append(data.y.float()) # [[512, 300]]
         
-    else: # local baselines
-        for data in tqdm(test_loader):
-            data = data.to(device)
-
-            if baseline_type == "khop_mean":
-                out = khop_mean_baseline_batch(data) # [512, 300]
-            elif baseline_type == "khop_celltype_mean":
-                out = center_celltype_mean_baseline_batch(data) # [512, 300]   
-            else:
-                raise ValueError(f"Baseline type {baseline_type} not recognized!")
-                
-            preds.append(out)
-            
-            if data.y.shape != out.shape:
-                actuals.append(torch.reshape(data.y.float(), out.shape))
-            else:
-                actuals.append(data.y.float()) # [[512, 300]]
-            
-            # get cell type
-            celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
+        celltypes = np.concatenate((celltypes,np.concatenate(data.center_celltype))) # [512]
         
     preds = np.concatenate([pred.detach().cpu().numpy() for pred in preds]) # [num_cells, num_genes]
     actuals = np.concatenate([act.detach().cpu().numpy() for act in actuals]) # [num_cells, num_genes]
@@ -393,39 +388,7 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
         list(overall_stats_dict.items()),
         columns=["Metric", "Value"]
     )
-    overall_stats_dict.to_csv(os.path.join(save_dir, "test_evaluation_stats_macro_micro.csv"), index=False)
-
-    # #--------------------------------
-    # metric_col = []
-    # ct_col = []
-    # val_col = []
-
-    # for col in columns_to_plot:
-    #     for ct in ct_stats_dict.keys():
-    #         val = ct_stats_dict[ct][col]
-            
-    #         metric_col.append(col)
-    #         ct_col.append(ct)
-    #         val_col.append(val)
-
-    # plot_df = pd.DataFrame(np.vstack((metric_col, ct_col, val_col)).T, columns=["Metric","Cell type","Value"])
-    # plot_df["Value"] = plot_df["Value"].astype(float)
-
-    # # plot
-    # fig, ax = plt.subplots(figsize=(12,4))
-    # sns.barplot(plot_df, x="Cell type", y="Value", hue="Metric", palette="Reds", ax=ax)
-    # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-    # plt.title(save_dir.split("/")[-2], fontsize=14)
-    # plt.xticks(rotation=30, ha='right', fontsize=12)
-    # plt.yticks(fontsize=12)
-    # plt.xlabel("Cell type", fontsize=14)
-    # plt.ylabel("Metric Value", fontsize=14)
-    # plt.setp(ax.get_legend().get_texts(), fontsize='14')
-    # plt.setp(ax.get_legend().get_title(), fontsize='16')
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(save_dir, "prediction_performance_CELL.pdf"), bbox_inches='tight')
-    # plt.close()
-        
+    overall_stats_dict.to_csv(os.path.join(save_dir, "test_evaluation_stats_macro_micro.csv"), index=False)        
     print("Finished cell type analysis.", flush=True)
 
 

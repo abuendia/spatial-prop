@@ -748,7 +748,6 @@ def test(
         if model.predict_celltype:
             expr_out, celltype_logits = forward_output  # Unpack tuple
             all_ct_preds.append(celltype_logits)
-            all_ct_targets.append(center_celltypes)
         else:
             expr_out = forward_output
         
@@ -756,6 +755,7 @@ def test(
 
         all_preds.append(expr_out.detach().cpu().numpy())
         all_targets.append(target.detach().cpu().numpy())
+        all_ct_targets.append(center_celltypes)
         all_center_ct_strings.extend(center_ct_strings)
         
         if loss == "mse":
@@ -835,9 +835,8 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Processing data groups"):
-            batch_count += 1
-            
             batch.to(device)
+            batch_count += 1
             
             # Prepare arguments for forward pass
             forward_args = {
@@ -850,7 +849,6 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
             
             forward_output = model(**forward_args)
             
-            # Handle both single-task and multi-task outputs
             if model.predict_celltype:
                 out, _ = forward_output  # Unpack tuple, use expression output for prediction
             else:
@@ -859,23 +857,14 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
             batch_predictions = out.detach().cpu().numpy()
             
             for i, pred in enumerate(batch_predictions):
-                original_cell_idx = batch.original_cell_idx[i].item()
-                
+                original_cell_id = batch.original_cell_id[i]
+                original_cell_idx = adata.obs_names.get_loc(original_cell_id)
+
                 if len(pred) == n_genes:
                     prediction_matrix[original_cell_idx, :] = pred
                 else:
                     raise ValueError(f"Prediction dimension {len(pred)} doesn't match genes {n_genes}")
                 predicted_cells.add(original_cell_idx)
         
-    # Final summary
-    print(f"Processed {batch_count} batches")
-
-    original_expression = adata.X.toarray() if issparse(adata.X) else adata.X
-    perturbation_effects = prediction_matrix - original_expression
-    
     adata.layers['predicted_perturbed'] = prediction_matrix
-    adata.layers['perturbation_effects'] = perturbation_effects
-    print(f"Predicted {len(predicted_cells)} cells out of {n_cells} total cells")
-    print(f"Perturbation effects calculated as: predicted - original")
-    
     return adata
