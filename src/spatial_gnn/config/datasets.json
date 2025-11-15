@@ -93,5 +93,11 @@
                        "Mixed mesenchymal mesoderm", "NMP", "Neural crest",
                        "Presomitic mesoderm", "Sclerotome", "Spinal cord",
                        "Splanchnic mesoderm", "Surface ectoderm"]
+    },
+	"farah": {
+        "train_ids": ["R78_4C12", "R78_4C15"],
+        "test_ids": ["R77_4C4"],
+        "file_name": "humanheart_overall_merfish.h5ad",
+        "celltypes": ["BEC", "EPDC", "Epicardial", "LEC", "Neuronal", "Pericyte", "VEC", "VIC", "VSMC", "WBC", "aCM-LA", "aCM-RA", "aEndocardial", "aFibro", "adFibro", "ncCM-AVC-like", "ncCM-IFT-like", "vCM-His-Purkinje", "vCM-LV-AV", "vCM-LV-Compact", "vCM-LV-Trabecular", "vCM-Proliferating", "vCM-RV-AV", "vCM-RV-Compact", "vCM-RV-Trabecular", "vEndocardial", "vFibro"]
     }
 } 
