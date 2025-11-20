@@ -6,7 +6,7 @@ GPUS=(0 1 2 3)   # 2 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/run_baselines.py
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot")
-BASELINE_TYPE="center_celltype_global_mean"
+BASELINE_TYPE="global_mean"
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 # ----------------
@@ -34,7 +34,7 @@ for dataset in "${DATASETS[@]}"; do
       --dataset "$dataset" \
       --base_path /oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw \
       --exp_name "$dataset" \
-      --k_hop 2 \
+      --k_hop 3 \
       --augment_hop 2 \
       --center_celltypes "all" \
       --node_feature "expression" \

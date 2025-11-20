@@ -10,6 +10,7 @@ import sys
 from collections import Counter
 
 import torch
+import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
@@ -50,6 +51,8 @@ def train_model_from_scratch(
     use_oracle_ct: bool = False,
     ablate_gene_expression: bool = False,
     use_one_hot_ct: bool = False,
+    pool: Optional[str] = None,
+    predict_residuals: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -108,6 +111,8 @@ def train_model_from_scratch(
         Whether to use oracle cell type for cell type prediction
     use_one_hot_ct : bool, default=False
         Whether to use one-hot encoding for cell type prediction
+    predict_residuals : bool, default=False
+        Whether to predict residuals of gene expression
     Returns
     -------
     Tuple[GNN, str]
@@ -226,7 +231,7 @@ def train_model_from_scratch(
             input_dim=int(train_dataset.get(0).x.shape[1]),
             num_layers=k_hop,
             method="GIN",
-            pool="add",
+            pool=pool,
             celltypes_to_index=celltypes_to_index,
         )
         celltype_model.to(device)
@@ -244,7 +249,7 @@ def train_model_from_scratch(
         class_weights = torch.tensor(class_weights, device=device)
         
         print(f"Training cell type model for {epochs} epochs...")
-        best_accuracy = 0.0
+        best_val_loss = np.inf
         patience = 5
         epochs_without_improvement = 0
         
@@ -260,22 +265,35 @@ def train_model_from_scratch(
             celltype_model.eval()
             all_ct_preds = []
             all_ct_targets = []
+            total_val_loss = 0.0
+            num_batches = 0
             with torch.no_grad():
                 for batch in test_loader:
                     batch = batch.to(device)
                     center_celltypes_idx = [celltypes_to_index[item[0]] for item in batch.center_celltype]
-                    ct_logits = celltype_model(batch.x, batch.edge_index, batch.batch)
+                    center_ct = torch.tensor(center_celltypes_idx, device=device, dtype=torch.long)
+                    ct_logits = celltype_model(
+                        x=batch.x,
+                        edge_index=batch.edge_index,
+                        batch=batch.batch,
+                        center_cell_idx=batch.center_node,
+                    )
+                    # Compute validation loss
+                    val_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
+                    total_val_loss += val_loss.item()
+                    num_batches += 1
                     all_ct_preds.append(ct_logits)
                     all_ct_targets.extend(center_celltypes_idx)
             
+            avg_val_loss = total_val_loss / num_batches if num_batches > 0 else 0.0
             all_ct_preds = torch.cat(all_ct_preds, dim=0)
             ct_accuracy = compute_celltype_accuracy(all_ct_preds, np.array(all_ct_targets))
 
-            print(f"Cell type model - Epoch: {epoch:03d}, Test Celltype Accuracy: {ct_accuracy:.4f}", flush=True)
+            print(f"Cell type model - Epoch: {epoch:03d}, Validation Loss: {avg_val_loss:.4f}, Test Celltype Accuracy: {ct_accuracy:.4f}", flush=True)
             
-            # Early stopping logic
-            if ct_accuracy > best_accuracy:
-                best_accuracy = ct_accuracy
+            # Early stopping logic based on validation loss
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
                 epochs_without_improvement = 0
                 # Save best model
                 best_model_path = os.path.join(model_save_dir, "celltype_model_best.pth")
@@ -283,7 +301,7 @@ def train_model_from_scratch(
             else:
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= patience:
-                    print(f"Early stopping: No improvement for {patience} epochs. Best accuracy: {best_accuracy:.4f}", flush=True)
+                    print(f"Early stopping: No improvement for {patience} epochs. Best validation loss: {best_val_loss:.4f}", flush=True)
                     # Load best model
                     best_model_path = os.path.join(model_save_dir, "celltype_model_best.pth")
                     celltype_model.load_state_dict(torch.load(best_model_path))
@@ -303,7 +321,7 @@ def train_model_from_scratch(
         output_dim=len(train_dataset.get(0).y),
         inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
         method="GIN", 
-        pool="add", 
+        pool=pool, 
         num_layers=k_hop,
         genept_embeddings=genept_embeddings,
         genept_strategy=genept_strategy,  
@@ -313,6 +331,7 @@ def train_model_from_scratch(
         celltype_model=celltype_model,  # Pass pre-trained model for decoupled training
         ablate_gene_expression=ablate_gene_expression,
         use_one_hot_ct=use_one_hot_ct,
+        predict_residuals=predict_residuals,
     )
     model.to(device)
     print(f"Expression model initialized on {device}")
@@ -408,7 +427,7 @@ def train_model_from_scratch(
         "num_layers": k_hop,
         "hidden_channels": 64,
         "method": "GIN",
-        "pool": "add",
+        "pool": pool,
         "node_feature": node_feature,
         "inject_feature": inject_feature,
         "k_hop": k_hop,
@@ -471,6 +490,8 @@ def main():
     parser.add_argument("--use_oracle_ct", action='store_true', help="Use oracle cell type for cell type prediction")
     parser.add_argument("--ablate_gene_expression", action='store_true', help="Ablate gene expression for expression prediction")
     parser.add_argument("--use_one_hot_ct", action='store_true', help="Use one-hot encoding for cell type prediction")
+    parser.add_argument("--pool", help="Pooling method", type=str, default=None)
+    parser.add_argument("--predict_residuals", action='store_true', help="Predict residuals of gene expression")
 
     # AnnData-specific arguments
     parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
@@ -544,6 +565,8 @@ def main():
         use_oracle_ct=args.use_oracle_ct,
         ablate_gene_expression=args.ablate_gene_expression,
         use_one_hot_ct=args.use_one_hot_ct,
+        pool=args.pool,
+        predict_residuals=args.predict_residuals,
     )
 
     if args.do_eval:
@@ -554,7 +577,8 @@ def main():
             save_dir=model_save_dir,
             device=args.device,
             inject=False,
-            gene_names=gene_names
+            gene_names=gene_names,
+            predict_residuals=args.predict_residuals,
         )
 
 

@@ -5,13 +5,24 @@ import os
 import pandas as pd
 
 import torch
-from torch_geometric.nn import GCNConv, GINConv, SAGEConv, global_mean_pool, global_add_pool, global_max_pool
-from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList, LayerNorm, Dropout
+from torch_geometric.nn import (
+    GCNConv,
+    GINConv,
+    SAGEConv,
+    global_mean_pool,
+    global_add_pool,
+    global_max_pool,
+    SAGPooling,
+    ASAPooling,
+)
+from torch_geometric.nn.glob import GlobalAttention
+from torch.nn import Linear, Sequential, BatchNorm1d, ReLU, ModuleList
 import torch.nn.functional as F
 from torch.nn.modules.loss import _Loss
 from torch.distributions.multivariate_normal import MultivariateNormal as MVN
 
 from spatial_gnn.utils.metric_utils import compute_spearman, compute_celltype_accuracy
+from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch
 
 
 class CellTypeGNN(torch.nn.Module):
@@ -63,27 +74,69 @@ class CellTypeGNN(torch.nn.Module):
         else:
             raise Exception("'method' not recognized.")
 
+        if self.pool == "SAGPooling":
+            self.attention_pool_layer = SAGPooling(hidden_channels, ratio=1)
+        elif self.pool == "ASAPooling":
+            self.attention_pool_layer = ASAPooling(hidden_channels, ratio=1)
+        elif self.pool == "GlobalAttention":
+            self.attention_pool_layer = GlobalAttention(
+                gate_nn=Sequential(
+                    Linear(hidden_channels, hidden_channels),
+                    BatchNorm1d(hidden_channels),
+                    ReLU(),
+                    Linear(hidden_channels, 1),
+                ),
+            )
+
         # Cell-type classifier head
         self.celltype_head = Linear(hidden_channels, self.num_celltypes)
 
-    def _pool(self, x, batch):
+    def _pool(self, x, edge_index, batch, center_cell_idx=None):
         if self.pool == "mean":
             return global_mean_pool(x, batch)
         elif self.pool == "add":
             return global_add_pool(x, batch)
         elif self.pool == "max":
             return global_max_pool(x, batch)
+        elif self.pool == "center":
+            if center_cell_idx is None:
+                raise ValueError("center_cell_idx must be provided when pool='center'")
+            num_graphs = batch.max().item() + 1
+            node_counts = torch.bincount(batch, minlength=num_graphs)
+            graph_offsets = torch.cumsum(torch.cat([torch.tensor([0], device=batch.device), node_counts[:-1]]), dim=0)
+            center_node_indices = graph_offsets + center_cell_idx
+            return x[center_node_indices]
+        if self.pool == "SAGPooling":
+            x, _, _, batch, _, _ = self.attention_pool_layer(x, edge_index, batch=batch)
+            return x
+        elif self.pool == "ASAPooling":
+            x, _, _, batch, _ = self.attention_pool_layer(x, edge_index, batch=batch)
+            return x
+        elif self.pool == "GlobalAttention":
+            x = self.attention_pool_layer(x, batch=batch)
+            return x
         else:
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
-    def forward(self, x, edge_index, batch):
+    def forward(
+        self,
+        x,
+        edge_index,
+        batch,
+        center_cell_idx=None,
+    ):
         """Return cell-type logits."""
         ct_h = self.ct_conv1(x, edge_index)
         ct_h = F.relu(ct_h)
         for i, conv in enumerate(self.ct_convs):
             ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
 
-        ct_pooled = self._pool(ct_h, batch)
+        ct_pooled = self._pool(
+            x=ct_h,
+            edge_index=edge_index,
+            batch=batch,
+            center_cell_idx=center_cell_idx,
+        )
         ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
         celltype_logits = self.celltype_head(ct_pooled)
         return celltype_logits
@@ -107,6 +160,7 @@ class GNN(torch.nn.Module):
         celltype_model=None,
         ablate_gene_expression=False,
         use_one_hot_ct=False,
+        predict_residuals=False,
     ):
         super(GNN, self).__init__()
         torch.manual_seed(444)
@@ -121,12 +175,28 @@ class GNN(torch.nn.Module):
         self.celltype_model = celltype_model  # Separate cell type model for decoupled training
         self.ablate_gene_expression = ablate_gene_expression
         self.use_one_hot_ct = use_one_hot_ct
-
+        self.predict_residuals = predict_residuals 
         self.has_genept = genept_embeddings is not None
         self.genept_embeddings = genept_embeddings
         self.genept_embedding_dim = 0
         self._genept_cache_ready = False
         self.genept_strategy = genept_strategy
+
+        baseline_dim = self.output_dim if not self.predict_residuals else 0
+
+        if self.pool == "SAGPooling":
+            self.attention_pool_layer = SAGPooling(hidden_channels, ratio=1)
+        elif self.pool == "ASAPooling":
+            self.attention_pool_layer = ASAPooling(hidden_channels, ratio=1)
+        elif self.pool == "GlobalAttention":
+            self.attention_pool_layer = GlobalAttention(
+                gate_nn=Sequential(
+                    Linear(hidden_channels, hidden_channels),
+                    BatchNorm1d(hidden_channels),
+                    ReLU(),
+                    Linear(hidden_channels, 1),
+                ),
+            )
 
         # Set embedding dimension if GenePT embeddings are provided
         if self.genept_embeddings is not None:
@@ -135,28 +205,14 @@ class GNN(torch.nn.Module):
 
         if self.genept_strategy == "early_fusion":
             input_dim = input_dim + self.genept_embedding_dim
-            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+            head_in_dim = hidden_channels + inject_dim + baseline_dim
+            self.lin_base = Linear(head_in_dim, output_dim)
         elif self.genept_strategy == "late_fusion":
-            self.lin_base = Linear(hidden_channels + inject_dim + self.genept_embedding_dim, output_dim)
-        elif self.genept_strategy == "xattn":
-            # cross-attention
-            self.q_proj = Linear(hidden_channels, hidden_channels)
-            self.k_proj = Linear(hidden_channels, hidden_channels)
-            self.genept_to_hidden = Linear(self.genept_embedding_dim, hidden_channels)
-            self.xattn = torch.nn.MultiheadAttention(hidden_channels, num_heads=8, batch_first=True)
-
-            self.pre_attn_ln = LayerNorm(hidden_channels)
-            self.post_attn_ln = LayerNorm(hidden_channels)
-
-            self.genept_dropout = Dropout(0.15)
-            self.fuse_gate = Sequential(
-                Linear(hidden_channels, hidden_channels),
-                ReLU(),
-                Linear(hidden_channels, 1)
-            )
-            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+            head_in_dim = hidden_channels + inject_dim + self.genept_embedding_dim + baseline_dim
+            self.lin_base = Linear(head_in_dim, output_dim)
         else:
-            self.lin_base = Linear(hidden_channels + inject_dim, output_dim)
+            head_in_dim = hidden_channels + inject_dim + baseline_dim
+            self.lin_base = Linear(head_in_dim, output_dim)
 
         # Expression branch GNN
         if self.method == "GCN":
@@ -240,6 +296,15 @@ class GNN(torch.nn.Module):
                 Linear(hidden_channels, output_dim)
             )
 
+        if self.predict_residuals:
+            last_layers = []
+            if hasattr(self, "expr_mlp"):
+                last_layers.append(self.expr_mlp[-1])
+            if hasattr(self, "lin_base"):
+                last_layers.append(self.lin_base)
+            for layer in last_layers:
+                torch.nn.init.zeros_(layer.weight)
+                torch.nn.init.zeros_(layer.bias)
 
     def _prepare_genept_lookup(self, gene_names, device="cuda"):
         # Map genes -> row in embedding matrix
@@ -275,17 +340,41 @@ class GNN(torch.nn.Module):
         cell_genept_embed = cell_genept_embed / (torch.linalg.norm(cell_genept_embed, axis=1, keepdim=True) + 1e-12)
         return cell_genept_embed
 
-    def _pool(self, x, batch):
+    def _pool(self, x, edge_index, batch, center_cell_idx=None):
         if self.pool == "mean":
             return global_mean_pool(x, batch)
         elif self.pool == "add":
             return global_add_pool(x, batch)
         elif self.pool == "max":
             return global_max_pool(x, batch)
+        elif self.pool == "center":
+            if center_cell_idx is None:
+                raise ValueError("center_cell_idx must be provided when pool='center'")
+            num_graphs = batch.max().item() + 1
+            node_counts = torch.bincount(batch, minlength=num_graphs)
+            graph_offsets = torch.cumsum(torch.cat([torch.tensor([0], device=batch.device), node_counts[:-1]]), dim=0)
+            center_node_indices = graph_offsets + center_cell_idx
+            return x[center_node_indices]
+        if self.pool == "SAGPooling":
+            x, _, _, batch, _, _ = self.attention_pool_layer(x, edge_index, batch=batch)
+            return x
+        elif self.pool == "ASAPooling":
+            x, _, _, batch, _ = self.attention_pool_layer(x, edge_index, batch=batch)
+            return x
+        elif self.pool == "GlobalAttention":
+            x = self.attention_pool_layer(x, batch=batch)
+            return x
         else:
             raise ValueError(f"'pool' not recognized: {self.pool}")
 
-    def _forward_expr_backbone(self, x, edge_index, batch, gene_names=None):
+    def _forward_expr_backbone(
+        self,
+        x, 
+        edge_index, 
+        batch, 
+        center_cell_idx=None,
+        gene_names=None,
+    ):
         # GenePT early fusion
         if self.genept_strategy == "early_fusion":
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
@@ -301,23 +390,34 @@ class GNN(torch.nn.Module):
             weighted_genept_embeddings = self._compute_genept_weighted_embedding(x, gene_names, device=x.device)
             h = torch.cat([h, weighted_genept_embeddings], dim=1)
 
-        expr_pooled = self._pool(h, batch)
+        expr_pooled = self._pool(
+            x=h,
+            edge_index=edge_index,
+            batch=batch,
+            center_cell_idx=center_cell_idx,
+        )
         expr_pooled = F.dropout(expr_pooled, p=0.1, training=self.training)
         return expr_pooled
 
-    def forward_celltype(self, x, edge_index, batch):
+    def forward_celltype(
+        self,
+        x,
+        edge_index,
+        batch,
+        center_cell_idx=None,
+    ):
         """Return only cell-type logits (no expression)."""
         assert self.predict_celltype, "Celltype branch not enabled"
         
         if not self.train_multitask and self.celltype_model is not None:
-            return self.celltype_model(x, edge_index, batch)
+            return self.celltype_model(x, edge_index, batch, center_cell_idx=center_cell_idx)
 
         ct_h = self.ct_conv1(x, edge_index)
         ct_h = F.relu(ct_h)
         for i, conv in enumerate(self.ct_convs):
             ct_h = conv(ct_h, edge_index) if i == len(self.ct_convs)-1 else F.relu(conv(ct_h, edge_index))
 
-        ct_pooled = self._pool(ct_h, batch)
+        ct_pooled = self._pool(ct_h, edge_index, batch)
         ct_pooled = F.dropout(ct_pooled, p=0.1, training=self.training)
         celltype_logits = self.celltype_head(ct_pooled)
         return celltype_logits
@@ -327,6 +427,7 @@ class GNN(torch.nn.Module):
         x,
         edge_index,
         batch,
+        center_cell_idx=None,
         inject=None,
         gene_names=None,
         center_celltype=None,
@@ -349,9 +450,24 @@ class GNN(torch.nn.Module):
             
             expr_out = self.ablation_mlp(fused)
             return expr_out
+
+        k_hop_baseline = None
+        if self.predict_residuals:
+            k_hop_mean_baseline = khop_mean_baseline_batch(
+                x=x,
+                edge_index=edge_index,
+                batch=batch,
+                center_cell_idx=center_cell_idx,
+            )
         
         # Normal mode: use gene expression backbone
-        expr_pooled = self._forward_expr_backbone(x, edge_index, batch, gene_names=gene_names)
+        expr_pooled = self._forward_expr_backbone(
+            x=x,
+            edge_index=edge_index,
+            batch=batch,
+            center_cell_idx=center_cell_idx,
+            gene_names=gene_names,
+        )
 
         if not self.predict_celltype:
             base_in = expr_pooled if inject is None else torch.cat([expr_pooled, inject], dim=1)
@@ -385,6 +501,7 @@ class GNN(torch.nn.Module):
         x,
         edge_index,
         batch,
+        center_cell_idx=None,
         inject=None,
         gene_names=None,
         use_oracle_ct=False,
@@ -401,6 +518,7 @@ class GNN(torch.nn.Module):
                 x=x,
                 edge_index=edge_index,
                 batch=batch,
+                center_cell_idx=center_cell_idx,
                 inject=inject,
                 gene_names=gene_names,
                 use_oracle_ct=True,  # Always use oracle in ablation mode
@@ -415,6 +533,7 @@ class GNN(torch.nn.Module):
                 x=x,
                 edge_index=edge_index,
                 batch=batch,
+                center_cell_idx=center_cell_idx,
                 inject=inject,
                 gene_names=gene_names,
                 use_oracle_ct=use_oracle_ct,
@@ -426,9 +545,9 @@ class GNN(torch.nn.Module):
 
         if not use_oracle_ct and not self.train_multitask:
             with torch.no_grad():
-                ct_logits = self.forward_celltype(x, edge_index, batch)
+                ct_logits = self.forward_celltype(x, edge_index, center_cell_idx=center_cell_idx, batch=batch)
         elif not use_oracle_ct and self.train_multitask:
-            ct_logits = self.forward_celltype(x, edge_index, batch)
+            ct_logits = self.forward_celltype(x, edge_index, center_cell_idx=center_cell_idx, batch=batch)
         elif use_oracle_ct:
             ct_logits = F.one_hot(torch.tensor(center_celltype, device=x.device, dtype=torch.long), num_classes=self.num_celltypes).float()
         
@@ -436,6 +555,7 @@ class GNN(torch.nn.Module):
             x=x,
             edge_index=edge_index,
             batch=batch,
+            center_cell_idx=center_cell_idx,
             inject=inject,
             gene_names=gene_names,
             use_oracle_ct=use_oracle_ct,
@@ -602,7 +722,7 @@ def train_celltype_model(
     Used in decoupled training mode.
     """
     celltype_model.train()
-    optimizer = torch.optim.Adam(celltype_model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(celltype_model.parameters(), lr=1e-5)
     
     for epoch in range(epochs):
         for batch in loader:
@@ -611,7 +731,12 @@ def train_celltype_model(
             center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
             
             optimizer.zero_grad(set_to_none=True)
-            ct_logits = celltype_model(batch.x, batch.edge_index, batch.batch)
+            ct_logits = celltype_model(
+                x = batch.x,
+                edge_index=batch.edge_index,
+                batch=batch.batch,
+                center_cell_idx=batch.center_node,
+            )
             ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
             ct_loss.backward()
             optimizer.step()
@@ -647,6 +772,7 @@ def train(
                 x=batch.x,
                 edge_index=batch.edge_index,
                 batch=batch.batch,
+                center_cell_idx=batch.center_node,
                 inject=(batch.inject if inject else None),
                 gene_names=gene_names,
                 use_oracle_ct=use_oracle_ct,
@@ -668,7 +794,12 @@ def train(
             
             if not use_oracle_ct:
                 with torch.no_grad():
-                    ct_logits = model.forward_celltype(batch.x, batch.edge_index, batch.batch)
+                    ct_logits = model.forward_celltype(
+                        x=batch.x,
+                        edge_index=batch.edge_index,
+                        batch=batch.batch,
+                        center_cell_idx=batch.center_node,
+                    )
             else:
                 ct_logits = None
 
@@ -676,6 +807,7 @@ def train(
                 x=batch.x,
                 edge_index=batch.edge_index,
                 batch=batch.batch,
+                center_cell_idx=batch.center_node,
                 inject=(batch.inject if inject else None),
                 gene_names=gene_names,
                 use_oracle_ct=use_oracle_ct,    
@@ -694,6 +826,7 @@ def train(
             x=batch.x,
             edge_index=batch.edge_index,
             batch=batch.batch,
+            center_cell_idx=batch.center_node,
             inject=(batch.inject if inject else None),
             gene_names=gene_names,
             ct_logits=None,
@@ -736,6 +869,7 @@ def test(
             'x': batch.x,
             'edge_index': batch.edge_index, 
             'batch': batch.batch,
+            'center_cell_idx': batch.center_node,
             'inject': batch.inject if inject else None,
             'gene_names': gene_names,
             'use_oracle_ct': use_oracle_ct,
@@ -843,6 +977,7 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
                 'x': batch.x,
                 'edge_index': batch.edge_index, 
                 'batch': batch.batch,
+                'center_cell_idx': batch.center_node,
                 'inject': batch.inject if hasattr(batch, 'inject') and batch.inject is not None else None,
                 'gene_names': gene_names,
             }

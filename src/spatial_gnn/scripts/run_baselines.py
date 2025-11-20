@@ -23,7 +23,6 @@ from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.models.mean_baselines import(
     khop_mean_baseline_batch,
-    center_celltype_mean_baseline_batch,
     global_mean_baseline_batch,
     center_celltype_global_mean_baseline_batch,
 )
@@ -171,8 +170,6 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
             out = torch.stack(out)
         elif baseline_type == "khop_mean":
             out = khop_mean_baseline_batch(data) # [512, 300]
-        elif baseline_type == "khop_celltype_mean":
-            out = center_celltype_mean_baseline_batch(data) # [512, 300]   
         else:
             raise ValueError(f"Baseline type {baseline_type} not recognized!")
             

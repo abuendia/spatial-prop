@@ -6,23 +6,28 @@ GPUS=(0 1 2 3)   # 4 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_with_celltype.py
 
-DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot")
+DATASETS=("reprogramming" "androvic")
+K_HOP=2
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 
-# (predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct)
+# (predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct, attention_pool)
 EXPERIMENTS=(
   # 1. ablate gene expression: ablate_gene_expression=True, use_oracle_ct=True, use_one_hot_ct=True
-  "True False none False True True True"
+  # "True False none False True True True"
   # 2. use oracle cell type: ablate_gene_expression=False, use_oracle_ct=True, use_one_hot_ct=False
-  "True False none False True False False"
+  # "True False none False True False False"
   # 3. use one-hot cell type: ablate_gene_expression=False, use_oracle_ct=False, use_one_hot_ct=True
-  "True False none False False False True"
+  # "True False none False False False True"
   # 4. use softmax cell type: ablate_gene_expression=False, use_oracle_ct=False, use_one_hot_ct=False
-  "True False none False False False False"
+  # "True False none False False False False"
   # 5. use expression only: ablate_gene_expression=False, use_oracle_ct=False, use_one_hot_ct=False
-  "False False none False False False False"
+  # "False False none False False False False"
+  # "True False none False False False False center"
+  "True False none False False False False center"
+  "True False none False False False False ASAPooling"
+  "True False none False False False False GlobalAttention"
 )
 EPOCHS=50
 # ----------------
@@ -40,7 +45,7 @@ for g in "${GPUS[@]}"; do echo "$g" >&3; done
 for dataset in "${DATASETS[@]}"; do
   for exp_config in "${EXPERIMENTS[@]}"; do
     # Parse tuple: (predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct)
-    read -r predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct <<< "$exp_config"
+    read -r predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct pool <<< "$exp_config"
     read -r gpu <&3   # blocks until a GPU is free
 
     {
@@ -50,15 +55,15 @@ for dataset in "${DATASETS[@]}"; do
 
         if [ "$train_multitask" = True ]; then
           TRAIN_MULTITASK_FLAG="--train_multitask"
-          EXP_NAME="expression_with_celltype_multitask"
+          EXP_NAME="expression_with_celltype_multitask_khop${K_HOP}"
         else
           TRAIN_MULTITASK_FLAG=""
-          EXP_NAME="expression_with_celltype_decoupled"
+          EXP_NAME="expression_with_celltype_decoupled_khop${K_HOP}"
         fi
       else
         PREDICT_CELLTYPE_FLAG=""
         TRAIN_MULTITASK_FLAG=""
-        EXP_NAME="expression_only"
+        EXP_NAME="expression_only_khop${K_HOP}"
       fi
 
       if [ "$genept_strategy" = "early_fusion" ]; then
@@ -110,6 +115,24 @@ for dataset in "${DATASETS[@]}"; do
         USE_ONE_HOT_CT_FLAG=""
         EXP_NAME="${EXP_NAME}_softmax_ct"
       fi
+
+      if [ "$pool" = "ASAPooling" ]; then
+        POOL_FLAG="--pool ASAPooling"
+        EXP_NAME="${EXP_NAME}_ASAPooling"
+      elif [ "$pool" = "SAGPooling" ]; then
+        POOL_FLAG="--pool SAGPooling"
+        EXP_NAME="${EXP_NAME}_SAGPooling"
+      elif [ "$pool" = "GlobalAttention" ]; then
+        POOL_FLAG="--pool GlobalAttention"
+        EXP_NAME="${EXP_NAME}_GlobalAttention"
+      elif [ "$pool" = "center" ]; then
+        POOL_FLAG="--pool center"
+        EXP_NAME="${EXP_NAME}_center_pool"
+      else
+        POOL_FLAG=""
+        EXP_NAME="${EXP_NAME}"
+      fi
+
       ts=$(date +%Y%m%d_%H%M%S)
       log="$LOGDIR/baselines_${dataset}_${EXP_NAME}_${ts}.log"
       echo "[$(date +%T)] start $dataset $EXP_NAME on GPU $gpu -> $log"
@@ -119,7 +142,7 @@ for dataset in "${DATASETS[@]}"; do
         --dataset "$dataset" \
         --base_path "$BASE/data/raw" \
         --exp_name "${EXP_NAME}" \
-        --k_hop 2 \
+        --k_hop $K_HOP \
         --augment_hop 2 \
         --center_celltypes "all" \
         --node_feature "expression" \
@@ -127,6 +150,7 @@ for dataset in "${DATASETS[@]}"; do
         --learning_rate 0.0001 \
         --loss weightedl1 \
         --epochs $EPOCHS \
+        --do_eval \
         $USE_ORACLE_CT_FLAG \
         $GENEPT_STRATEGY_FLAG \
         $GENEPT_EMBEDDINGS_FLAG \
@@ -135,6 +159,7 @@ for dataset in "${DATASETS[@]}"; do
         $DEBUG_FLAG \
         $ABLATE_GENE_EXPRESSION_FLAG \
         $USE_ONE_HOT_CT_FLAG \
+        $POOL_FLAG
         >"$log" 2>&1
 
       status=$?

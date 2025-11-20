@@ -28,8 +28,9 @@ from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import r2_score
 
-from aging_gnn_model import *
-from perturbation import *
+from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
+from spatial_gnn.utils.perturbation_utils import batch_steering_mean, batch_steering_cell, predict, temper
+from spatial_gnn.utils.dataset_utils import get_center_celltypes
 
 ### Load in dataset configs
 

@@ -19,7 +19,7 @@ from sklearn.metrics import r2_score
 from scipy.stats import pearsonr, spearmanr
 
 from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
-from spatial_gnn.models.gnn_model import GNN
+from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 
 
@@ -34,13 +34,8 @@ def main():
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
-    parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
-    parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
-    parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
     parser.add_argument("--debug", help="Enable debug mode with subset of data for quick testing", action="store_true")
-    parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
-    parser.add_argument("--number_genept_embeddings", help="Number of GenePT embeddings to use", type=int, default=None)
     args = parser.parse_args()
 
     # Load dataset configurations
@@ -66,9 +61,6 @@ def main():
     center_celltypes = parse_center_celltypes(args.center_celltypes)
     node_feature = args.node_feature
     inject_feature = args.inject_feature
-    learning_rate = args.learning_rate
-    loss = args.loss
-    epochs = args.epochs
 
     if inject_feature.lower() == "none":
         inject_feature = None
@@ -91,12 +83,6 @@ def main():
     if args.dataset is not None:
         exp_name = args.dataset
 
-    if args.genept_embeddings is not None:
-        with open(args.genept_embeddings, "rb") as f:
-            genept_embeddings_raw = pickle.load(f)
-        # Convert all keys to uppercase
-        genept_embeddings = {k.upper(): v for k, v in genept_embeddings_raw.items()}
-    
     # init dataset with settings
     train_dataset = SpatialAgingCellDataset(subfolder_name="train",
                                             dataset_prefix=exp_name,
@@ -137,46 +123,39 @@ def main():
         all_test_data.extend(batch_list)
     test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     print(len(test_dataset), flush=True)
-    
-    if inject is True:
-        model = GNN(
-            hidden_channels=64,
-            input_dim=int(train_dataset.get(0).x.shape[1]),
-            output_dim=len(train_dataset.get(0).y),
-            inject_dim=int(train_dataset.get(0).inject.shape[1]),
-            method="GIN", 
-            pool="add", 
-            num_layers=k_hop,
-            genept_embeddings=genept_embeddings,
-        )
-    else:
-        model = GNN(
-            hidden_channels=64,
-            input_dim=int(train_dataset.get(0).x.shape[1]),
-            output_dim=len(train_dataset.get(0).y),
-            method="GIN", 
-            pool="add", 
-            num_layers=k_hop,
-            genept_embeddings=genept_embeddings,
-        )
 
+    cell_type_model = CellTypeGNN(
+        hidden_channels=64,
+        input_dim=int(train_dataset.get(0).x.shape[1]),
+        num_layers=k_hop,
+        method="GIN",
+        pool="add",
+        celltypes_to_index=celltypes_to_index,
+    )
+
+    cell_type_model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/expression_with_celltype_decoupled_no_genept_softmax_ct/zeng_expression_2hop_2augment_expression_none/weightedl1_1en04/celltype_model.pth"
+    cell_type_model.load_state_dict(torch.load(cell_type_model_path))
+    
+    model = GNN(
+        hidden_channels=64,
+        input_dim=int(train_dataset.get(0).x.shape[1]),
+        output_dim=len(train_dataset.get(0).y),
+        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
+        method="GIN", 
+        pool="add", 
+        num_layers=k_hop,
+        celltypes_to_index=celltypes_to_index,
+        predict_celltype=True,
+        train_multitask=False,
+        celltype_model=cell_type_model,  # Pass pre-trained model for decoupled training
+        ablate_gene_expression=False,
+        use_one_hot_ct=False,
+        attention_pool=None,
+    )
     print(f"Model initialized on {device}")
 
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
-
-    # Create save directory structure
-    exp_dir_name = f"{args.dataset}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
-    if args.debug:
-        exp_dir_name = f"DEBUG_{exp_dir_name}"
-    model_dir_name = args.loss + f"_{args.learning_rate:.0e}".replace("-", "n")
-    
-    if args.genept_embeddings is not None:
-        if args.number_genept_embeddings is not None:
-            model_dir_name = f"{model_dir_name}_GenePT_top{args.number_genept_embeddings}_genes"
-        else:
-            model_dir_name = f"{model_dir_name}_GenePT_all_genes"
-
-    model_save_dir = os.path.join(f"{args.exp_name}/results/gnn", exp_dir_name, model_dir_name)
+    model_save_dir = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/expression_with_celltype_decoupled_no_genept_softmax_ct/zeng_expression_2hop_2augment_expression_none/weightedl1_1en04/"
 
     model.load_state_dict(torch.load(os.path.join(model_save_dir, f"{use_model}.pth")), strict=False)
     model.to(device)
@@ -219,10 +198,14 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     
     for data in tqdm(test_loader):
         data = data.to(device)
-        if inject is False:
-            out = model(data.x, data.edge_index, data.batch, None, gene_names) 
-        else:
-            out = model(data.x, data.edge_index, data.batch, data.inject, gene_names)
+        out = model(
+            x=data.x,
+            edge_index=data.edge_index,
+            batch=data.batch,
+            center_cell_idx=data.center_node,
+            inject=data.inject if inject else None,
+            gene_names=gene_names,
+        )
 
         if model.predict_celltype:
             out, _ = out  # Unpack tuple, use expression output for prediction

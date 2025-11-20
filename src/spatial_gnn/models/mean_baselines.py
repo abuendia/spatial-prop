@@ -1,113 +1,55 @@
 import torch
 import numpy as np
-from typing import List
+from typing import List, Optional
 from collections import defaultdict
 
 from torch_geometric.data import Data, Batch
 
 
-def khop_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
+from typing import Optional
+import torch
+from torch_geometric.data import Batch
+from torch_geometric.nn import global_add_pool
+
+
+def khop_mean_baseline_batch(
+    batch_data: Optional[Batch] = None,
+    x: Optional[torch.Tensor] = None,
+    batch: Optional[torch.Tensor] = None,
+    center_nodes: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """
-    In k-hop graph, take the average expression over all cells for each gene.
-    Use that expression as the prediction for the center cell.
-    
-    Parameters
-    ----------
-    batch_data : Batch
-        PyTorch Geometric Batch object containing:
-        - x: node features (cells x genes expression matrix)
-        - center_node: indices of center cells
-        - batch: batch assignment for each node
-        - y: target expression for center cells (all genes)
-        
-    Returns
-    -------
-    torch.Tensor
-        Predicted expression values for center cells (batch_size x num_genes)
+    Compute k-hop mean baseline for each center node in the batch.
     """
-    x = batch_data.x  # (num_nodes, num_genes)
-    center_nodes = batch_data.center_node  # (batch_size,)
-    batch_ids = batch_data.batch  # (num_nodes,)
+    if batch_data is not None:
+        x = batch_data.x                     
+        batch_ids = batch_data.batch      
+        center_nodes_local = batch_data.center_node  
+    else:
+        if x is None or batch is None or center_nodes is None:
+            raise ValueError("Must provide either batch_data or (x, batch, center_nodes).")
+        batch_ids = batch
+        center_nodes_local = center_nodes
+
     num_genes = x.shape[1]
-    batch_size = len(center_nodes)
-    
-    predictions = torch.zeros(batch_size, num_genes, device=x.device) # (batch_size, num_genes)
-    
-    for i in range(batch_size):
-        center_node = center_nodes[i]
+    num_graphs = center_nodes_local.shape[0]
+    preds = torch.zeros(num_graphs, num_genes, device=x.device)
 
-        # Get nodes belonging to this graph
-        graph_mask = batch_ids == i
-        exclude_center_node_mask = torch.arange(len(batch_ids), device=x.device) != center_node
-        neighbor_mask = graph_mask & exclude_center_node_mask
-        neighbor_indices = torch.where(neighbor_mask)[0]
+    for g in range(num_graphs):
+        graph_nodes = (batch_ids == g).nonzero(as_tuple=False).view(-1)
+        if graph_nodes.numel() == 0:
+            continue  
 
-        if len(neighbor_indices) > 0:
-            # Get average expression across all neighbor cells for all genes
-            predictions[i] = torch.mean(x[neighbor_indices], dim=0)
+        local_center_idx = int(center_nodes_local[g])
+        global_center_idx = int(graph_nodes[local_center_idx])
+        neighbor_indices = graph_nodes[graph_nodes != global_center_idx]
+
+        if neighbor_indices.numel() > 0:
+            preds[g] = x[neighbor_indices].mean(dim=0)
         else:
-            # If no neighbors, use zeros
-            predictions[i] = torch.zeros(num_genes, device=x.device)
-    
-    return predictions
+            preds[g] = 0.0  
 
-
-def center_celltype_mean_baseline_batch(batch_data: Batch) -> torch.Tensor:
-    """
-    In k-hop graph, take the average expression over all cells of the center cell type 
-    for each gene. Use that expression as the prediction for the center cell.
-    
-    Parameters
-    ----------
-    batch_data : Batch
-        PyTorch Geometric Batch object containing:
-        - x: node features (cells x genes expression matrix)
-        - center_node: indices of center cells
-        - batch: batch assignment for each node
-        - celltypes: cell types for all nodes
-        - center_celltype: cell types of center cells
-        - y: target expression for center cells (all genes)
-        
-    Returns
-    -------
-    torch.Tensor
-        Predicted expression values for center cells (batch_size x num_genes)
-    """
-    x = batch_data.x  # (total_nodes, num_genes)
-    center_nodes = batch_data.center_node  # (batch_size,)
-    batch_ids = batch_data.batch  # (total_nodes,)
-    celltypes = np.array([celltype for subgraph in batch_data.celltypes for celltype in subgraph]) # (total_nodes,)
-    center_celltypes = batch_data.center_celltype  # (batch_size,)
-    num_genes = x.shape[1]
-    batch_size = len(center_nodes)
-    
-    predictions = torch.zeros(batch_size, num_genes, device=x.device)
-    
-    for i in range(batch_size):
-        # Get nodes belonging to this graph
-        graph_mask = batch_ids == i
-        center_node = center_nodes[i]
-        center_celltype = center_celltypes[i]
-        
-        # Find cells of the same type as the center cell, excluding the center cell itself
-        exclude_center_node_mask = torch.arange(len(batch_ids), device=x.device) != center_node
-        same_celltype_type_mask = torch.tensor((celltypes == center_celltype), device=x.device) & graph_mask & exclude_center_node_mask
-        same_type_indices = torch.where(same_celltype_type_mask)[0]
-        
-        if len(same_type_indices) > 0:
-            # Get average expression for cells of the same type
-            predictions[i] = torch.mean(x[same_type_indices], dim=0)
-        else:
-            # If no other cells of the same type, fall back to k-hop mean
-            neighbor_mask = graph_mask & exclude_center_node_mask
-            neighbor_indices = torch.where(neighbor_mask)[0]
-            
-            if len(neighbor_indices) > 0:
-                predictions[i] = torch.mean(x[neighbor_indices], dim=0)
-            else:
-                predictions[i] = torch.zeros(num_genes, device=x.device)
-        
-    return predictions
+    return preds
 
 
 def global_mean_baseline_batch(train_loader, device="cuda") -> torch.Tensor:
