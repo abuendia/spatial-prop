@@ -1,4 +1,4 @@
-# %% 
+# %%
 import os
 import pandas as pd
 import seaborn as sns
@@ -24,7 +24,7 @@ def load_metrics_macro_micro(path: str) -> dict:
 
 
 def load_metrics_micro_only(path: str) -> dict:
-    """Load metrics from a 'micro only' CSV (Metric,Value with 'Pearson', 'Pearson (Nonzero)', etc.)."""
+    """Load metrics from a 'micro only' CSV (Metric,Value with 'Pearson', etc.)."""
     df = pd.read_csv(path)
     return {
         "pearson": df.loc[df["Metric"] == "Pearson", "Value"].iloc[0],
@@ -49,151 +49,152 @@ def safe_load_metrics(path: str, loader, label: str = "") -> dict:
 
 
 # ------------------------
-# 2. Collect all rows: GNN 2/3-hop + baselines
+# 2. Collect all rows: 2-hop GNN + 2-hop baselines + residual models
 # ------------------------
 
-k_hop_options = [2, 3]
-pool_options = ["ASAPooling", "center_pool", "GlobalAttention"]
 datasets = ["androvic", "reprogramming"]
-
 rows = []
 
-# --- GNN models (2- and 3-hop, three pooling strategies) ---
+# --- 2-hop GNN models (ASAPooling, center_pool, GlobalAttention) ---
+pool_options = ["ASAPooling", "center_pool", "GlobalAttention"]
+
 for dataset in datasets:
-    for k_hop in k_hop_options:
-        for pool in pool_options:
-            results_file = (
-                f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/"
-                f"expression_with_celltype_decoupled_khop{k_hop}_no_genept_softmax_ct_{pool}/"
-                f"{dataset}_expression_{k_hop}hop_2augment_expression_none/weightedl1_1en04/"
-                "test_evaluation_stats_macro_micro.csv"
-            )
-            metrics = safe_load_metrics(
-                results_file,
-                load_metrics_macro_micro,
-                label=f"{dataset}, {k_hop}-hop, {pool}",
-            )
-            if metrics is None:
-                continue
-
-            row = {
-                "dataset": dataset,
-                "k_hop": k_hop,
-                "pool": pool,
-            }
-            row.update(metrics)
-            rows.append(row)
-
-# --- Baseline models: 2-hop and 3-hop for khop_mean/global_mean, 2-hop for no_graph_decoupled ---
-
-# NOTE: now each tuple is (pool_name, k_hop, path, loader)
-baseline_paths = {
-    "androvic": [
-        # 2-hop baselines
-        (
-            "khop_mean",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "androvic_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "khop_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "global_mean",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "androvic_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "global_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "no_graph_decoupled",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/"
-            "expression_with_celltype_decoupled_no_genept_softmax_ct/"
-            "androvic_expression_2hop_2augment_expression_none/weightedl1_1en04/"
-            "test_evaluation_stats_micro.csv",
-            load_metrics_micro_only,
-        ),
-        # 3-hop baselines (NEW)
-        (
-            "khop_mean",
-            3,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "androvic_expression_100per_3hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "khop_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "global_mean",
-            3,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "androvic_expression_100per_3hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "global_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-    ],
-    "reprogramming": [
-        # 2-hop baselines
-        (
-            "khop_mean",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "reprogramming_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "khop_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "global_mean",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "reprogramming_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "global_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "no_graph_decoupled",
-            2,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/"
-            "expression_with_celltype_decoupled_no_genept_softmax_ct/"
-            "reprogramming_expression_2hop_2augment_expression_none/weightedl1_1en04/"
-            "test_evaluation_stats_micro.csv",
-            load_metrics_micro_only,
-        ),
-        # 3-hop baselines (NEW)
-        (
-            "khop_mean",
-            3,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "reprogramming_expression_100per_3hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "khop_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-        (
-            "global_mean",
-            3,
-            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
-            "reprogramming_expression_100per_3hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
-            "global_mean/test_evaluation_stats_macro_micro.csv",
-            load_metrics_macro_micro,
-        ),
-    ],
-}
-
-for dataset, specs in baseline_paths.items():
-    for pool_name, k_hop, path, loader in specs:
+    for pool in pool_options:
+        results_file = (
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/"
+            f"expression_with_celltype_decoupled_khop2_no_genept_softmax_ct_{pool}/"
+            f"{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+            "test_evaluation_stats_macro_micro.csv"
+        )
         metrics = safe_load_metrics(
-            path,
-            loader,
-            label=f"{dataset}, baseline {pool_name}, {k_hop}-hop",
+            results_file,
+            load_metrics_macro_micro,
+            label=f"{dataset}, 2-hop, {pool}",
         )
         if metrics is None:
             continue
 
         row = {
             "dataset": dataset,
-            "k_hop": k_hop,  # <-- now correctly 2 or 3
+            "k_hop": 2,
+            "pool": pool,
+        }
+        row.update(metrics)
+        rows.append(row)
+
+# --- Baseline models: 2-hop only for khop_mean/global_mean/no_graph_decoupled ---
+
+# each tuple is (pool_name, path, loader)
+baseline_paths = {
+    "androvic": [
+        (
+            "khop_mean",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
+            "androvic_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
+            "khop_mean/test_evaluation_stats_macro_micro.csv",
+            load_metrics_macro_micro,
+        ),
+        (
+            "global_mean",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
+            "androvic_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
+            "global_mean/test_evaluation_stats_macro_micro.csv",
+            load_metrics_macro_micro,
+        ),
+        (
+            "no_graph_decoupled",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/"
+            "expression_with_celltype_decoupled_no_genept_softmax_ct/"
+            "androvic_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+            "test_evaluation_stats_micro.csv",
+            load_metrics_micro_only,
+        ),
+    ],
+    "reprogramming": [
+        (
+            "khop_mean",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
+            "reprogramming_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
+            "khop_mean/test_evaluation_stats_macro_micro.csv",
+            load_metrics_macro_micro,
+        ),
+        (
+            "global_mean",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/"
+            "reprogramming_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/"
+            "global_mean/test_evaluation_stats_macro_micro.csv",
+            load_metrics_macro_micro,
+        ),
+        (
+            "no_graph_decoupled",
+            "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/"
+            "expression_with_celltype_decoupled_no_genept_softmax_ct/"
+            "reprogramming_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+            "test_evaluation_stats_micro.csv",
+            load_metrics_micro_only,
+        ),
+    ],
+}
+
+for dataset, specs in baseline_paths.items():
+    for pool_name, path, loader in specs:
+        metrics = safe_load_metrics(
+            path,
+            loader,
+            label=f"{dataset}, baseline {pool_name}",
+        )
+        if metrics is None:
+            continue
+
+        row = {
+            "dataset": dataset,
+            "k_hop": 2,
             "pool": pool_name,
+        }
+        row.update(metrics)
+        rows.append(row)
+
+# --- Residual-prediction center_pool models (2-hop only, both datasets) ---
+
+residual_exps = {
+    # expression-only, center_pool, residual + penalty
+    "center_pool_expr_only_resid_pen": (
+        "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/"
+        "expression_only_khop2_no_genept_softmax_ct_center_pool_predict_residuals_residual_penalty/"
+        "{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+        "test_evaluation_stats_macro_micro.csv"
+    ),
+    # celltype-decoupled, center_pool, residual (no penalty)
+    "center_pool_ctdec_resid": (
+        "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/"
+        "expression_with_celltype_decoupled_khop2_no_genept_softmax_ct_center_pool_predict_residuals/"
+        "{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+        "test_evaluation_stats_macro_micro.csv"
+    ),
+    # celltype-decoupled, center_pool, residual + penalty
+    "center_pool_ctdec_resid_pen": (
+        "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/"
+        "expression_with_celltype_decoupled_khop2_no_genept_softmax_ct_center_pool_predict_residuals_residual_penalty/"
+        "{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/"
+        "test_evaluation_stats_macro_micro.csv"
+    ),
+}
+
+for dataset in datasets:
+    for pool_name, template in residual_exps.items():
+        path = template.format(dataset=dataset)
+        metrics = safe_load_metrics(
+            path,
+            load_metrics_macro_micro,
+            label=f"{dataset}, {pool_name}",
+        )
+        if metrics is None:
+            continue
+
+        row = {
+            "dataset": dataset,
+            "k_hop": 2,        # all of these are 2-hop
+            "pool": pool_name, # distinct name for plotting
         }
         row.update(metrics)
         rows.append(row)
@@ -206,7 +207,7 @@ metrics_df = pd.DataFrame(rows)
 print("Data shape:", metrics_df.shape)
 print(metrics_df.head())
 
-# Create combined label: "2-hop ASAPooling", "3-hop center_pool", "2-hop khop_mean", etc.
+# Create combined label: "2-hop ASAPooling", "2-hop khop_mean", "2-hop center_pool_ctdec_resid", etc.
 metrics_df["pool_k"] = metrics_df.apply(
     lambda r: f"{int(r['k_hop'])}-hop {r['pool']}",
     axis=1,
@@ -227,10 +228,10 @@ metrics = [
 
 baseline_pools = ["khop_mean", "global_mean", "no_graph_decoupled"]
 
-# Exclude baselines for "best model" calculation (works for both 2-hop and 3-hop baselines)
+# Exclude baselines for "best model" calculation
 gnn_only_df = metrics_df[~metrics_df["pool"].isin(baseline_pools)].copy()
 
-print("\n========== Best GNN Models per Dataset (Excluding Baselines) ==========")
+print("\n========== Best 2-hop GNN Models per Dataset (Excluding Baselines) ==========")
 
 for metric in metrics:
     print(f"\n--- Metric: {metric} ---")
@@ -242,12 +243,12 @@ for metric in metrics:
 
         if metric.startswith("mae"):  # lower is better
             idx = df_sub[metric].idxmin()
-            best_row = gnn_only_df.loc[idx]
             direction = "LOWEST"
         else:  # higher is better
             idx = df_sub[metric].idxmax()
-            best_row = gnn_only_df.loc[idx]
             direction = "HIGHEST"
+
+        best_row = df_sub.loc[idx]
 
         print(
             f"  {dataset}: {direction} {metric} = {best_row[metric]:.4f} | "
@@ -255,24 +256,30 @@ for metric in metrics:
         )
 
 # ------------------------
-# 5. Plotting
+# 5. Plotting (2-hop only)
 # ------------------------
 
 dataset_order = ["androvic", "reprogramming"]
 
 # Define all possible model labels in the order you care about
-base_pools = ["ASAPooling", "center_pool", "GlobalAttention",
-              "khop_mean", "global_mean", "no_graph_decoupled"]
+base_pools = [
+    "ASAPooling",
+    "center_pool",
+    "GlobalAttention",
+    "khop_mean",
+    "global_mean",
+    "no_graph_decoupled",
+    "center_pool_expr_only_resid_pen",
+    "center_pool_ctdec_resid",
+    "center_pool_ctdec_resid_pen",
+]
 
-# Now allow both 2-hop and 3-hop for ALL pools (filter will drop missing combos)
-pool_k_order = (
-    [f"2-hop {p}" for p in base_pools] +
-    [f"3-hop {p}" for p in base_pools]
-)
-
-# Filter pool_k_order to only those that actually exist in the data
-existing_pool_k = metrics_df["pool_k"].unique().tolist()
-pool_k_order = [pk for pk in pool_k_order if pk in existing_pool_k]
+# Only keep labels that actually exist in the data
+pool_k_order = [
+    f"2-hop {p}"
+    for p in base_pools
+    if f"2-hop {p}" in metrics_df["pool_k"].unique()
+]
 
 for metric in metrics:
     plt.figure(figsize=(9, 4))
@@ -285,11 +292,11 @@ for metric in metrics:
         hue_order=pool_k_order,
         palette="deep",
     )
-    plt.title(f"{metric.replace('_', ' ').title()} (2-hop vs 3-hop + baselines)")
+    plt.title(f"{metric.replace('_', ' ').title()} (2-hop GNNs + baselines + residual models)")
     plt.xlabel("Dataset")
     plt.ylabel(metric.replace("_", " ").title())
     plt.legend(
-        title="Model (k-hop / pooling)",
+        title="Model (2-hop / pooling)",
         bbox_to_anchor=(1.05, 1),
         loc="upper left",
         borderaxespad=0.0,

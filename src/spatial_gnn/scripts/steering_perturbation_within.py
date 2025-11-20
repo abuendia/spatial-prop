@@ -1,49 +1,24 @@
 import numpy as np
 import pandas as pd
-import scanpy as sc
-import squidpy as sq
-import anndata as ad
-from scipy.stats import pearsonr, spearmanr, ttest_ind
+from scipy.stats import pearsonr, spearmanr
 import pickle
 import os
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-from matplotlib.collections import PatchCollection
-from matplotlib.colors import ListedColormap
-import seaborn as sns
-sns.set_style("ticks")
-from sklearn.neighbors import BallTree
-from scipy.stats import mannwhitneyu, ttest_ind
-from statsmodels.stats.multitest import multipletests
-from decimal import Decimal
-import copy
-import json 
-import random
-import networkx as nx
 import argparse
 import torch
-from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
-from sklearn.metrics import r2_score
+from tqdm import tqdm
 
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
-from spatial_gnn.utils.perturbation_utils import batch_steering_mean, batch_steering_cell, predict, temper
-from spatial_gnn.utils.dataset_utils import get_center_celltypes
+from spatial_gnn.utils.perturbation_utils import batch_steering_cell, batch_steering_mean
+from spatial_gnn.utils.dataset_utils import load_dataset_config
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
+from spatial_gnn.models.mean_baselines import (
+    global_mean_baseline_batch,
+    khop_mean_baseline_batch,
+)
 
-### Load in dataset configs
-
-def load_dataset_config():
-    """Load dataset configurations from JSON file."""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
 
 def main():
     # set up arguments
@@ -55,29 +30,22 @@ def main():
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
-    parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
-    parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
-    parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
-    parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
+    parser.add_argument("--exp_name", help="experiment name", type=str, required=True)
+    parser.add_argument("--debug", help="debug mode", action="store_true")
     
     # steering-specific arguments
     parser.add_argument("--steering_approach", help="steering method to use", type=str)
     parser.add_argument("--num_props", help="number of intervals from 0 to 1", type=int)
-    parser.add_argument("--train_or_test", help="train or test dataset", type=str)
+    parser.add_argument("--model_type", help="model type to use", type=str, default=None)
     
     args = parser.parse_args()
-    
     steering_approach = args.steering_approach
     num_props = args.num_props
     props = np.linspace(0,1,num_props+1) # proportions to scale
-    train_or_test = args.train_or_test
+    model_type = args.model_type
 
-    # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
     
-    # set which model to use
-    use_model = "model" # "best_model"
-
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
@@ -92,18 +60,8 @@ def main():
     augment_hop = args.augment_hop
     
     # Handle center_celltypes
-    if args.center_celltypes.lower() == 'none':
-        center_celltypes = None
-    elif args.center_celltypes.lower() == 'all':
-        center_celltypes = 'all'
-    else:
-        center_celltypes = args.center_celltypes.split(",")
-    
     node_feature = args.node_feature
     inject_feature = args.inject_feature
-    learning_rate = args.learning_rate
-    loss = args.loss
-    epochs = args.epochs
 
     if inject_feature.lower() == "none":
         inject_feature = None
@@ -115,100 +73,112 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device, flush=True)
 
-    # train
-    exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
-
-    # Load gene list if provided
-    gene_list = None
-    if args.gene_list is not None:
-        try:
-            with open(args.gene_list, 'r') as f:
-                gene_list = [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
-
     # Build cell type index
     celltypes_to_index = {}
     for ci, cellt in enumerate(dataset_config["celltypes"]):
         celltypes_to_index[cellt] = ci
+
+    train_dataset = SpatialAgingCellDataset(
+        subfolder_name="train",
+        dataset_prefix=args.dataset,
+        target="expression",
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        use_ids=train_ids,
+        raw_filepaths=[file_path],
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        debug=args.debug,
+        overwrite=False,
+        use_mp=False,
+    )
+
+    test_dataset = SpatialAgingCellDataset(
+        subfolder_name="test",
+        dataset_prefix=args.dataset,
+        target="expression",
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        use_ids=test_ids,
+        raw_filepaths=[file_path],
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        debug=args.debug,
+        overwrite=False,
+        use_mp=False,
+    )
+
+    train_dataset.process()
+    print("Finished processing train dataset", flush=True)
+    test_dataset.process()
+    print("Finished processing test dataset", flush=True)
+
+    all_train_data, all_test_data = [], []
+    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
+        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
+        all_train_data.extend(batch_list)
+    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
+        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
+        all_test_data.extend(batch_list)
     
-    
-    # init dataset with settings
-    train_dataset = SpatialAgingCellDataset(subfolder_name="train",
-                                            dataset_prefix=args.dataset,
-                                            target="expression",
-                                            k_hop=k_hop,
-                                            augment_hop=augment_hop,
-                                            node_feature=node_feature,
-                                            inject_feature=inject_feature,
-                                            num_cells_per_ct_id=100,
-                                            center_celltypes=center_celltypes,
-                                            use_ids=train_ids,
-                                            raw_filepaths=[file_path],
-                                            gene_list=gene_list,
-                                            celltypes_to_index=celltypes_to_index)
+    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    save_dir = os.path.join("steer_within", test_dataset.processed_dir.split("/")[-2], args.exp_name, model_type)
 
-    test_dataset = SpatialAgingCellDataset(subfolder_name="test",
-                                        dataset_prefix=args.dataset,
-                                        target="expression",
-                                        k_hop=k_hop,
-                                        augment_hop=augment_hop,
-                                        node_feature=node_feature,
-                                        inject_feature=inject_feature,
-                                        num_cells_per_ct_id=100,
-                                        center_celltypes=center_celltypes,
-                                        use_ids=test_ids,
-                                        raw_filepaths=[file_path],
-                                        gene_list=gene_list,
-                                        celltypes_to_index=celltypes_to_index)
-
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-
-    print(len(train_dataset), flush=True)
-    print(len(test_dataset), flush=True)
-
-
-    # init GNN model
-    if inject is True:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    inject_dim=int(train_dataset.get(0).inject.shape[1]), # added for injecting features into last layer (after pooling),
-                    method="GIN", pool="add", num_layers=k_hop)
-    else:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    method="GIN", pool="add", num_layers=k_hop)
-    model.to(device)
-    print(device, flush=True)
-
-    # create directory to save results
-    model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
-    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname,"steer_within")
     os.makedirs(save_dir, exist_ok=True)
+    print(f"Save directory: {save_dir}", flush=True)
+
+    model = GNN(
+        hidden_channels=64,
+        input_dim=int(train_dataset.get(0).x.shape[1]),
+        output_dim=len(train_dataset.get(0).y),
+        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
+        method="GIN", 
+        pool="center", 
+        num_layers=k_hop,
+        celltypes_to_index=celltypes_to_index,
+        predict_celltype=False,
+        train_multitask=False,
+        ablate_gene_expression=False,
+        use_one_hot_ct=False,
+    )
+    print(f"Model initialized on {device}")
+
+    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    model.load_state_dict(torch.load(model_save_dir), strict=False)
+    model.to(device)
+
+    eval_model(model, train_loader, test_loader, save_dir, model_type, steering_approach, num_props, props)
     
-    ### STEERING EXPERIMENTS ###
-    
-    # pick loader
-    if train_or_test == "train":
-        loader = train_loader
-    elif train_or_test == "test":
-        loader = test_loader
-    elif train_or_test == "all":
-        loader = all_loader
-    else:
-        raise Exception ("train_or_test not recognized!")
-        
+def eval_model(
+    model,
+    train_loader,
+    test_loader, 
+    save_dir, 
+    model_type,
+    steering_approach,
+    num_props,
+    props,
+    device="cuda",
+):
     # get savename
-    savename = steering_approach+"_"+str(num_props)+"steps_"+train_or_test
-    
-    # STEERING runs
-    
-    ood_subfoldername = "none" # set to this for the within runs
-    
-    model.eval()
+    savename = f"{steering_approach}_{num_props}steps_{model_type}"
+
+    # precompute training set baselines
+    if model_type == "global_mean":
+        global_mean = global_mean_baseline_batch(train_loader)
     
     print("Running steering...", flush=True)
     for prop in props:
@@ -221,14 +191,9 @@ def main():
         perturb_expressions_list = []
         start_celltypes_list = []
 
-        for data in loader:
-        
-            # random draw of graph from target graphs
-            if ood_subfoldername.lower() != "none": # OOD steering
-                random_target_idx = np.random.choice(np.arange(len(target_dataset)))
-
-            # make predictions
-            out = predict (model, data, inject)
+        for data in tqdm(test_loader):
+            data = data.to(device)
+            out = predict(model, data, inject=False)
 
             # get actual expression
             if data.y.shape != out.shape:
@@ -236,31 +201,20 @@ def main():
             else:
                 actual = data.y.float()
 
-            # get center cell types
-            celltypes = get_center_celltypes(data)
+            center_celltypes = get_center_celltypes(data)
 
             ### STEERING PERTURBATION (and appending target expressions)
             subset_same_celltype = False
 
+            random_target_idx = np.random.choice(np.arange(len(data)))
+            target = data[random_target_idx]
+
             if steering_approach == "batch_steer_mean":
-                #### shift cell type expression closer to mean of target
-                if ood_subfoldername.lower() != "none":
-                    # use an external target (random draw from other dataset or list of data objects)
-                    pdata, target_celltype, target_expression, target_out = batch_steering_mean(data, actual, out, celltypes, target=target_dataset.get(random_target_idx), prop=prop)
-                    subset_same_celltype = True
-                else:
-                    pdata, target_celltype, target_expression, target_out = batch_steering_mean(data, actual, out, celltypes, prop=prop)
-                    subset_same_celltype = True
-
+                pdata, target_celltype, target_expression, target_out = batch_steering_mean(data.cpu(), actual.cpu(), out.cpu(), center_celltypes, target=target.cpu(), prop=prop)
+                subset_same_celltype = True
             elif steering_approach == "batch_steer_cell":
-                #### randomly draw cell from first graph and replace in other graphs
-                if ood_subfoldername.lower() != "none":
-                    pdata, target_celltype, target_expression, target_out = batch_steering_cell(data, actual, out, celltypes, target=target_dataset.get(random_target_idx), prop=prop)
-                    subset_same_celltype = True
-                else:
-                    pdata, target_celltype, target_expression, target_out = batch_steering_cell(data, actual, out, celltypes, prop=prop)
-                    subset_same_celltype = True
-
+                pdata, target_celltype, target_expression, target_out = batch_steering_cell(data.cpu(), actual.cpu(), out.cpu(), center_celltypes, target=target.cpu(), prop=prop)
+                subset_same_celltype = True
             else:
                 raise Exception("steering_approach not recognized")
 
@@ -268,21 +222,27 @@ def main():
             target_expressions.append(target_expression)
             target_predictions.append(target_out)
             target_celltypes.append(target_celltype)
-            start_celltypes_list.append(celltypes)
+            start_celltypes_list.append(center_celltypes)
             perturb_props.append(round(prop,3))
 
-            # get perturbed predicted
-            pout = predict (model, pdata, inject)
-
-            # temper perturbed expression
-            perturbed = temper(actual, out, pout, method="none") # distribution_renormalize
+            # make predictions with baseline
+            if model_type == "global_mean":
+                batch_size = len(data.center_node)
+                perturbed = global_mean.unsqueeze(0).repeat(batch_size, 1)  # [batch_size, num_genes]
+            elif model_type == "khop_mean":
+                perturbed = khop_mean_baseline_batch(pdata) # [512, 300]
+            elif model_type == "model":
+                # get perturbed predicted
+                pout = predict(model, pdata.to(device), inject=False)
+                # temper perturbed expression
+                perturbed = temper(actual, out, pout, method="distribution")
 
             start_expressions = []
             perturb_expressions = []
-            for bi in np.unique(pdata.batch):
+            for bi in np.unique(pdata.batch.cpu()):
                 # subset to only those that have same center cell type as first graph
                 if subset_same_celltype is True:
-                    if (celltypes[bi] == target_celltype) and (bi>0):
+                    if (center_celltypes[bi] == target_celltype) and (bi>0):
                         start_expressions.append(actual[bi,:])
                         perturb_expressions.append(perturbed[bi,:])
                 else:
@@ -339,18 +299,17 @@ def main():
             
             for start in start_expressions_list[i]:
                 # compute stats for start
-                start = start.detach().numpy()
+                start = start.cpu().detach().numpy()
                 r_list_start.append(pearsonr(start[missing_mask], target[missing_mask])[0])
                 s_list_start.append(spearmanr(start[missing_mask], target[missing_mask])[0])
                 mae_list_start.append(np.mean(np.abs(start[missing_mask]-target[missing_mask])))
             
             for perturb in perturb_expressions_list[i]:
                 # compute stats for perturb
-                perturb = perturb.detach().numpy()
+                perturb = perturb.cpu().detach().numpy()
                 r_list_perturb.append(pearsonr(perturb[missing_mask], target[missing_mask])[0])
                 s_list_perturb.append(spearmanr(perturb[missing_mask], target[missing_mask])[0])
                 mae_list_perturb.append(np.mean(np.abs(perturb[missing_mask]-target[missing_mask])))
-                
                 prop_list.append(perturb_props[i])
 
     stats_df = pd.DataFrame(np.vstack((r_list_start+r_list_perturb,
@@ -362,157 +321,9 @@ def main():
     for col in ["Pearson", "Spearman", "MAE"]:
         stats_df[col] = stats_df[col].astype(float)
 
-    # save stats
     stats_df.to_csv(os.path.join(save_dir, f"{savename}_actualtarget.csv"))
-    
-    # make plots
     stats_df = pd.read_csv(os.path.join(save_dir, f"{savename}_actualtarget.csv"))
 
-    for value in ["Pearson", "Spearman", "MAE"]:
-        
-        # plot densities
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.kdeplot(stats_df[stats_df["Type"]=="Perturbed"], x=value, hue="Prop", ax=ax)
-        sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-        #plt.title(save_dir.split("/")[-3], fontsize=14)
-        plt.xticks(rotation=30, ha='right', fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            ax.set_xlabel(l, fontsize=16)
-            l = ax.get_ylabel()
-            ax.set_ylabel(l, fontsize=16)
-        ax.get_legend().set_title("Steering")
-        plt.setp(ax.get_legend().get_texts(), fontsize='14')
-        plt.setp(ax.get_legend().get_title(), fontsize='16')
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"{savename}_actualtarget_{value}_density.pdf"), bbox_inches='tight')
-        plt.close()
-        
-        # plot line with confidence interval
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(stats_df[stats_df["Type"]=="Perturbed"], x="Prop", y=value,
-                     ci=95, color='k', ax=ax)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            #ax.set_xlabel(l, fontsize=16)
-            ax.set_xlabel("Steering", fontsize=16)
-            l = ax.get_ylabel()
-            ax.set_ylabel(l, fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"{savename}_actualtarget_{value}.pdf"), bbox_inches='tight')
-        plt.close()
-    
-    print("Finished actualtarget steering...", flush=True)
-
-
-
-
-    # Compute stats comparing to target (predicted) -- predictions only made if not OOD so only do if not OOD
-    if ood_subfoldername.lower() == "none":
-
-        r_list_start = []
-        s_list_start = []
-        mae_list_start = []
-        r_list_perturb = []
-        s_list_perturb = []
-        mae_list_perturb = []
-        prop_list = []
-
-        for prop in props:
-
-            # load in each saved file
-            with open(os.path.join(save_dir, f"{savename}_{round(prop,3)*1000}.pkl"), 'rb') as f:
-                save_dict = pickle.load(f)
-            perturb_props = save_dict["perturb_props"]
-            target_predictions = save_dict["target_predictions"]
-            start_expressions_list = save_dict["start_expressions_list"]
-            perturb_expressions_list = save_dict["perturb_expressions_list"]
-            target_celltypes = save_dict["target_celltypes"]
-            start_celltypes_list = save_dict["start_celltypes_list"]
-            
-            # compute stats
-            for i in range(len(target_predictions)):
-                try:
-                    target = target_predictions[i].detach().numpy()
-                except:
-                    target = target_predictions[i]
-                
-                # mask out missing values to compute stats
-                missing_mask = target != -1
-                
-                for start in start_expressions_list[i]:
-                    # compute stats for start
-                    start = start.detach().numpy()
-                    r_list_start.append(pearsonr(start[missing_mask], target[missing_mask])[0])
-                    s_list_start.append(spearmanr(start[missing_mask], target[missing_mask])[0])
-                    mae_list_start.append(np.mean(np.abs(start[missing_mask]-target[missing_mask])))
-                
-                for perturb in perturb_expressions_list[i]:
-                    # compute stats for perturb
-                    perturb = perturb.detach().numpy()
-                    r_list_perturb.append(pearsonr(perturb[missing_mask], target[missing_mask])[0])
-                    s_list_perturb.append(spearmanr(perturb[missing_mask], target[missing_mask])[0])
-                    mae_list_perturb.append(np.mean(np.abs(perturb[missing_mask]-target[missing_mask])))
-                    
-                    prop_list.append(perturb_props[i])
-
-        stats_df = pd.DataFrame(np.vstack((r_list_start+r_list_perturb,
-                                           s_list_start+s_list_perturb,
-                                           mae_list_start+mae_list_perturb,
-                                           prop_list+prop_list,
-                                           ["Start"]*len(r_list_start)+["Perturbed"]*len(r_list_perturb))).T,
-                                columns=["Pearson", "Spearman", "MAE", "Prop", "Type"])
-        for col in ["Pearson", "Spearman", "MAE"]:
-            stats_df[col] = stats_df[col].astype(float)
-
-        # save stats
-        stats_df.to_csv(os.path.join(save_dir, f"{savename}_predictedtarget.csv"))
-        print("Finished predictedtarget steering...", flush=True)
-        
-        # make plots
-        stats_df = pd.read_csv(os.path.join(save_dir, f"{savename}_predictedtarget.csv"))
-
-        for value in ["Pearson", "Spearman", "MAE"]:
-            
-            # plot densities
-            fig, ax = plt.subplots(figsize=(6,4))
-            sns.kdeplot(stats_df[stats_df["Type"]=="Perturbed"], x=value, hue="Prop", ax=ax)
-            sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-            #plt.title(save_dir.split("/")[-3], fontsize=14)
-            plt.xticks(rotation=30, ha='right', fontsize=12)
-            plt.yticks(fontsize=12)
-            for ax in plt.gcf().axes:
-                l = ax.get_xlabel()
-                ax.set_xlabel(l, fontsize=16)
-                l = ax.get_ylabel()
-                ax.set_ylabel(l, fontsize=16)
-            ax.get_legend().set_title("Steering")
-            plt.setp(ax.get_legend().get_texts(), fontsize='14')
-            plt.setp(ax.get_legend().get_title(), fontsize='16')
-            plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f"{savename}_predictedtarget_{value}_density.pdf"), bbox_inches='tight')
-            plt.close()
-            
-            # plot line with confidence interval
-            fig, ax = plt.subplots(figsize=(6,4))
-            sns.lineplot(stats_df[stats_df["Type"]=="Perturbed"], x="Prop", y=value,
-                         ci=95, color='k', ax=ax)
-            plt.xticks(fontsize=12)
-            plt.yticks(fontsize=12)
-            for ax in plt.gcf().axes:
-                l = ax.get_xlabel()
-                #ax.set_xlabel(l, fontsize=16)
-                ax.set_xlabel("Steering", fontsize=16)
-                l = ax.get_ylabel()
-                ax.set_ylabel(l, fontsize=16)
-            plt.tight_layout()
-            plt.savefig(os.path.join(save_dir, f"{savename}_predictedtarget_{value}.pdf"), bbox_inches='tight')
-            plt.close()
-    
-    print("DONE.", flush=True)
-
+ 
 if __name__ == "__main__":
     main()

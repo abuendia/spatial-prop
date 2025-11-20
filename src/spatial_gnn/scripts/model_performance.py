@@ -20,6 +20,7 @@ from scipy.stats import pearsonr, spearmanr
 
 from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
+from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 
 
@@ -198,6 +199,15 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     
     for data in tqdm(test_loader):
         data = data.to(device)
+        
+        # Compute baseline if predicting residuals
+        if model.predict_residuals:
+            k_hop_baseline = khop_mean_baseline_batch(
+                x=data.x,
+                batch=data.batch,
+                center_nodes=data.center_node,
+            )
+        
         out = model(
             x=data.x,
             edge_index=data.edge_index,
@@ -209,6 +219,10 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
 
         if model.predict_celltype:
             out, _ = out  # Unpack tuple, use expression output for prediction
+        
+        # If predicting residuals, add baseline back to get final expression prediction
+        if model.predict_residuals:
+            out = out + k_hop_baseline
         
         # Move to CPU immediately to free GPU memory
         preds.append(out.detach().cpu())

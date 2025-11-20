@@ -210,13 +210,13 @@ def predict (model, data, inject=False):
     '''Get predicted expression
     '''
     if inject is False:
-        out = model(data.x, data.edge_index, data.batch, None)
+        out = model(data.x, data.edge_index, data.batch, center_cell_idx=data.center_node)
     else:
-        out = model(data.x, data.edge_index, data.batch, data.inject)
+        out = model(data.x, data.edge_index, data.batch, center_cell_idx=data.center_node, inject=data.inject)
     return (out)
 
 
-def get_center_celltypes (data):
+def get_center_celltypes(data):
     '''Get center cell types in data
     '''
     celltypes = []
@@ -314,7 +314,7 @@ def batch_steering_cell (data, actual, out, center_celltypes, target=None, prop=
     
 
 ### GO INTERACTION MODULES
-def perturb_by_multiplier (data, gene_indices, perturb_celltype=None, prop=1.0):
+def perturb_by_multiplier(data, gene_indices, perturb_celltype=None, prop=1.0):
     '''
     Multiplies gene expression by a scalar factor for a set of indices
     '''

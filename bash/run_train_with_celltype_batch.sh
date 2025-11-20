@@ -6,13 +6,13 @@ GPUS=(0 1 2 3)   # 4 GPUs
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PY=$BASE/src/spatial_gnn/scripts/train_gnn_with_celltype.py
 
-DATASETS=("reprogramming" "androvic")
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming")
 K_HOP=2
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 
-# (predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct, attention_pool)
+# (predict_celltype train_multitask genept_strategy use_oracle_ct ablate_gene_expression use_one_hot_ct, attention_pool, predict_residuals, residual_penalty, debug)
 EXPERIMENTS=(
   # 1. ablate gene expression: ablate_gene_expression=True, use_oracle_ct=True, use_one_hot_ct=True
   # "True False none False True True True"
@@ -25,9 +25,7 @@ EXPERIMENTS=(
   # 5. use expression only: ablate_gene_expression=False, use_oracle_ct=False, use_one_hot_ct=False
   # "False False none False False False False"
   # "True False none False False False False center"
-  "True False none False False False False center"
-  "True False none False False False False ASAPooling"
-  "True False none False False False False GlobalAttention"
+  "False False none False False False center False False False"
 )
 EPOCHS=50
 # ----------------
@@ -44,8 +42,8 @@ for g in "${GPUS[@]}"; do echo "$g" >&3; done
 # launch jobs (one per GPU at a time)
 for dataset in "${DATASETS[@]}"; do
   for exp_config in "${EXPERIMENTS[@]}"; do
-    # Parse tuple: (predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct)
-    read -r predict_celltype train_multitask genept_strategy debug use_oracle_ct ablate_gene_expression use_one_hot_ct pool <<< "$exp_config"
+    # Parse tuple
+    read -r predict_celltype train_multitask genept_strategy use_oracle_ct ablate_gene_expression use_one_hot_ct pool predict_residuals residual_penalty debug <<< "$exp_config"
     read -r gpu <&3   # blocks until a GPU is free
 
     {
@@ -133,8 +131,22 @@ for dataset in "${DATASETS[@]}"; do
         EXP_NAME="${EXP_NAME}"
       fi
 
+      if [ "$predict_residuals" = True ]; then
+        PREDICT_RESIDUALS_FLAG="--predict_residuals"
+        EXP_NAME="${EXP_NAME}_predict_residuals"
+      else
+        PREDICT_RESIDUALS_FLAG=""
+        EXP_NAME="${EXP_NAME}"
+      fi
+      
+      if [ "$residual_penalty" = True ]; then
+        EXP_NAME="${EXP_NAME}_residual_penalty"
+      else
+        EXP_NAME="${EXP_NAME}"
+      fi
+
       ts=$(date +%Y%m%d_%H%M%S)
-      log="$LOGDIR/baselines_${dataset}_${EXP_NAME}_${ts}.log"
+      log="$LOGDIR/residuals_${dataset}_${EXP_NAME}_${ts}.log"
       echo "[$(date +%T)] start $dataset $EXP_NAME on GPU $gpu -> $log"
 
       # Run and capture both stdout and stderr to the log file
@@ -159,7 +171,8 @@ for dataset in "${DATASETS[@]}"; do
         $DEBUG_FLAG \
         $ABLATE_GENE_EXPRESSION_FLAG \
         $USE_ONE_HOT_CT_FLAG \
-        $POOL_FLAG
+        $POOL_FLAG \
+        $PREDICT_RESIDUALS_FLAG \
         >"$log" 2>&1
 
       status=$?

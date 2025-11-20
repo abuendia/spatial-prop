@@ -182,7 +182,7 @@ class GNN(torch.nn.Module):
         self._genept_cache_ready = False
         self.genept_strategy = genept_strategy
 
-        baseline_dim = self.output_dim if not self.predict_residuals else 0
+        baseline_dim = 0
 
         if self.pool == "SAGPooling":
             self.attention_pool_layer = SAGPooling(hidden_channels, ratio=1)
@@ -451,15 +451,6 @@ class GNN(torch.nn.Module):
             expr_out = self.ablation_mlp(fused)
             return expr_out
 
-        k_hop_baseline = None
-        if self.predict_residuals:
-            k_hop_mean_baseline = khop_mean_baseline_batch(
-                x=x,
-                edge_index=edge_index,
-                batch=batch,
-                center_cell_idx=center_cell_idx,
-            )
-        
         # Normal mode: use gene expression backbone
         expr_pooled = self._forward_expr_backbone(
             x=x,
@@ -471,29 +462,29 @@ class GNN(torch.nn.Module):
 
         if not self.predict_celltype:
             base_in = expr_pooled if inject is None else torch.cat([expr_pooled, inject], dim=1)
-            return self.lin_base(base_in)
-
-        # With celltype prediction 
-        if use_oracle_ct:
-            # oracle one-hot
-            ct_idx = torch.tensor(center_celltype, device=expr_pooled.device, dtype=torch.long)
-            celltype_features = F.one_hot(ct_idx, num_classes=self.num_celltypes).float()
+            expr_out = self.lin_base(base_in)
         else:
-            assert ct_logits is not None, "ct_logits must be provided if not using oracle CT"
-            if allow_grad_through_ct:
-                # multitask: soft distribution, gradients flow back into ct branch
-                celltype_features = F.softmax(ct_logits, dim=1)
+            # With celltype prediction 
+            if use_oracle_ct:
+                # oracle one-hot
+                ct_idx = torch.tensor(center_celltype, device=expr_pooled.device, dtype=torch.long)
+                celltype_features = F.one_hot(ct_idx, num_classes=self.num_celltypes).float()
             else:
-                if self.use_one_hot_ct:
-                    celltype_features = F.one_hot(torch.argmax(ct_logits, dim=1), num_classes=self.num_celltypes).float()
-                else: 
+                assert ct_logits is not None, "ct_logits must be provided if not using oracle CT"
+                if allow_grad_through_ct:
+                    # multitask: soft distribution, gradients flow back into ct branch
                     celltype_features = F.softmax(ct_logits, dim=1)
+                else:
+                    if self.use_one_hot_ct:
+                        celltype_features = F.one_hot(torch.argmax(ct_logits, dim=1), num_classes=self.num_celltypes).float()
+                    else: 
+                        celltype_features = F.softmax(ct_logits, dim=1)
 
-        fused = torch.cat([expr_pooled, celltype_features], dim=1)
-        if inject is not None:
-            fused = torch.cat([fused, inject], dim=1)
-
-        expr_out = self.expr_mlp(fused)
+            fused = torch.cat([expr_pooled, celltype_features], dim=1)
+            if inject is not None:
+                fused = torch.cat([fused, inject], dim=1)
+            expr_out = self.expr_mlp(fused)
+                
         return expr_out
 
     def forward(
@@ -633,7 +624,7 @@ class Neg_Pearson_Loss(_Loss):
 
 
 
-def weighted_l1_loss(pred, target, zero_weight, nonzero_weight):
+def weighted_l1_loss(pred, target, zero_weight, nonzero_weight, residual_penalty=None):
 
     if target.shape != pred.shape:
         target = torch.reshape(target, pred.shape)
@@ -645,17 +636,21 @@ def weighted_l1_loss(pred, target, zero_weight, nonzero_weight):
     loss = (zero_weight * zero_mask * abs_diff +
             nonzero_weight * nonzero_mask * abs_diff)
     
+    if residual_penalty is not None:
+        loss = loss + residual_penalty * torch.mean(pred ** 2)
+    
     return loss.mean()
 
 class WeightedL1Loss(_Loss):
-    def __init__(self, zero_weight=1.0, nonzero_weight=1.0):
+    def __init__(self, zero_weight=1.0, nonzero_weight=1.0, residual_penalty=None):
         super(WeightedL1Loss, self).__init__()
         self.zero_weight = zero_weight
         self.nonzero_weight = nonzero_weight
+        self.residual_penalty = residual_penalty
 
     def forward(self, predictions, targets):
         
-        loss = weighted_l1_loss(predictions, targets, self.zero_weight, self.nonzero_weight)
+        loss = weighted_l1_loss(predictions, targets, self.zero_weight, self.nonzero_weight, self.residual_penalty)
         
         return loss
 
@@ -763,6 +758,17 @@ def train(
         center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
         center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
 
+        # Compute baseline and adjust targets if predicting residuals
+        target_expr = batch.y
+        if model.predict_residuals:
+            k_hop_baseline = khop_mean_baseline_batch(
+                x=batch.x,
+                batch=batch.batch,
+                center_nodes=batch.center_node,
+            )
+            k_hop_baseline = k_hop_baseline.flatten()
+            target_expr = target_expr - k_hop_baseline
+
         # Case 1: multitask, shared gradients
         if model.predict_celltype and model.train_multitask:
             expr_optimizer.zero_grad(set_to_none=True)
@@ -780,7 +786,7 @@ def train(
                 allow_grad_through_ct=True,
             )
 
-            expr_loss = criterion(expr_out, batch.y)
+            expr_loss = criterion(expr_out, target_expr)
             ct_loss = F.cross_entropy(ct_logits, center_ct, weight=class_weights)
             total_loss = expr_loss + celltype_weight * ct_loss
             total_loss.backward()
@@ -815,7 +821,7 @@ def train(
                 ct_logits=ct_logits,
                 allow_grad_through_ct=False,   # ensures no accidental graph links
             )
-            expr_loss = criterion(expr_out, batch.y)
+            expr_loss = criterion(expr_out, target_expr)
             expr_loss.backward()
             expr_optimizer.step()
             continue
@@ -832,7 +838,7 @@ def train(
             ct_logits=None,
             use_oracle_ct=use_oracle_ct,
         )
-        loss = criterion(out, batch.y)
+        loss = criterion(out, target_expr)
         loss.backward()
         expr_optimizer.step()
 
@@ -864,6 +870,15 @@ def test(
         
         center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
         center_ct_strings = [item[0] for item in batch.center_celltype]
+        
+        # Compute baseline if predicting residuals
+        if model.predict_residuals:
+            k_hop_baseline = khop_mean_baseline_batch(
+                x=batch.x,
+                batch=batch.batch,
+                center_nodes=batch.center_node,
+            )
+        
         # Prepare arguments for forward pass
         forward_args = {
             'x': batch.x,
@@ -884,6 +899,10 @@ def test(
             all_ct_preds.append(celltype_logits)
         else:
             expr_out = forward_output
+        
+        # If predicting residuals, add baseline back to get final expression prediction
+        if model.predict_residuals:
+            expr_out = expr_out + k_hop_baseline
         
         target = batch.y.unsqueeze(1)
 
@@ -972,6 +991,14 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
             batch.to(device)
             batch_count += 1
             
+            # Compute baseline if predicting residuals
+            if model.predict_residuals:
+                k_hop_baseline = khop_mean_baseline_batch(
+                    x=batch.x,
+                    batch=batch.batch,
+                    center_nodes=batch.center_node,
+                )
+            
             # Prepare arguments for forward pass
             forward_args = {
                 'x': batch.x,
@@ -988,6 +1015,10 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
                 out, _ = forward_output  # Unpack tuple, use expression output for prediction
             else:
                 out = forward_output
+            
+            # If predicting residuals, add baseline back to get final expression prediction
+            if model.predict_residuals:
+                out = out + k_hop_baseline
             
             batch_predictions = out.detach().cpu().numpy()
             

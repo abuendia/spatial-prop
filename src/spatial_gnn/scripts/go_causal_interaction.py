@@ -1,85 +1,49 @@
 import numpy as np
 import pandas as pd
-import scanpy as sc
-import squidpy as sq
-import anndata as ad
-from scipy.stats import pearsonr, spearmanr, ttest_ind
+from tqdm import tqdm
 import pickle
 import os
-import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-from matplotlib.collections import PatchCollection
-from matplotlib.colors import ListedColormap
-import seaborn as sns
-sns.set_style("ticks")
-from sklearn.neighbors import BallTree
-from scipy.stats import mannwhitneyu, ttest_ind
-from statsmodels.stats.multitest import multipletests
-from decimal import Decimal
-import copy
-import json 
-import random
-import networkx as nx
 import argparse
 import torch
-from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
-from sklearn.metrics import r2_score
+import scanpy as sc
 
-from aging_gnn_model import *
-from perturbation import *
-
-### Load in dataset configs
-
-def load_dataset_config():
-    """Load dataset configurations from JSON file."""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
+from spatial_gnn.models.gnn_model import GNN
+from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
+from spatial_gnn.utils.dataset_utils import load_dataset_config
+from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
+from spatial_gnn.utils.perturbation_utils import perturb_by_multiplier
 
 def main():
     # set up arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str, required=True)
+    parser.add_argument("--exp_name", help="experiment name", type=str, required=True)
     parser.add_argument("--base_path", help="Base path to the data directory", type=str, required=True)
     parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
     parser.add_argument("--augment_hop", help="number of hops to take for graph augmentation", type=int, required=True)
     parser.add_argument("--center_celltypes", help="cell type labels to center graphs on, separated by comma. Use 'all' for all cell types or 'none' for no cell type filtering", type=str, required=True)
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
-    parser.add_argument("--learning_rate", help="learning rate", type=float, required=True)
-    parser.add_argument("--loss", help="loss: balanced_mse, npcc, mse, l1", type=str, required=True)
-    parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
-    parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
+    parser.add_argument("--model_type", help="model type to use", type=str, required=True)
+    parser.add_argument("--debug", help="debug mode", action="store_true")
     
     # paired terms-specific arguments
     parser.add_argument("--pairs_path", help="path to GO pairs directory", type=str)
     parser.add_argument("--perturb_approach", help="perturbation method to use", type=str)
     parser.add_argument("--num_props", help="number of intervals from 0 to 1", type=int)
-    parser.add_argument("--train_or_test", help="train or test dataset", type=str)
-    parser.add_argument("--use_genept_embeds", help="path to GenePT embeddings JSON file", type=str, default=None)
-    
+
     args = parser.parse_args()
     
     pairs_path = args.pairs_path
     perturb_approach = args.perturb_approach
     num_props = args.num_props
-    train_or_test = args.train_or_test
-    use_genept_embeds = args.use_genept_embeds
+    model_type = args.model_type
 
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
     
-    # set which model to use
-    use_model = "model" # "best_model"
-
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
@@ -92,20 +56,9 @@ def main():
     file_path = os.path.join(args.base_path, dataset_config['file_name'])
     k_hop = args.k_hop
     augment_hop = args.augment_hop
-    
-    # Handle center_celltypes
-    if args.center_celltypes.lower() == 'none':
-        center_celltypes = None
-    elif args.center_celltypes.lower() == 'all':
-        center_celltypes = 'all'
-    else:
-        center_celltypes = args.center_celltypes.split(",")
-    
+        
     node_feature = args.node_feature
     inject_feature = args.inject_feature
-    learning_rate = args.learning_rate
-    loss = args.loss
-    epochs = args.epochs
 
     if inject_feature.lower() == "none":
         inject_feature = None
@@ -117,108 +70,121 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device, flush=True)
 
-    # train
-    exp_name = f"{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}_{learning_rate:.0e}lr_{loss}_{epochs}epochs"
-
-    # Load gene list if provided
-    gene_list = None
-    if args.gene_list is not None:
-        try:
-            with open(args.gene_list, 'r') as f:
-                gene_list = [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Gene list file not found at {args.gene_list}")
-    
     # Build cell type index
     celltypes_to_index = {}
     for ci, cellt in enumerate(dataset_config["celltypes"]):
         celltypes_to_index[cellt] = ci
+
+    train_dataset = SpatialAgingCellDataset(
+        subfolder_name="train",
+        dataset_prefix=args.dataset,
+        target="expression",
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        use_ids=train_ids,
+        raw_filepaths=[file_path],
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        debug=args.debug,
+        overwrite=False,
+        use_mp=False,
+    )
+
+    test_dataset = SpatialAgingCellDataset(
+        subfolder_name="test",
+        dataset_prefix=args.dataset,
+        target="expression",
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        use_ids=test_ids,
+        raw_filepaths=[file_path],
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        debug=args.debug,
+        overwrite=False,
+        use_mp=False,
+    )
+
+    train_dataset.process()
+    print("Finished processing train dataset", flush=True)
+    test_dataset.process()
+    print("Finished processing test dataset", flush=True)
+
+    all_train_data, all_test_data = [], []
+    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
+        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
+        all_train_data.extend(batch_list)
+    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
+        if args.debug and idx > 2:
+            break
+        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
+        all_test_data.extend(batch_list)
     
-    
-    # init dataset with settings
-    train_dataset = SpatialAgingCellDataset(subfolder_name="train",
-                                            dataset_prefix=args.dataset,
-                                            target="expression",
-                                            k_hop=k_hop,
-                                            augment_hop=augment_hop,
-                                            node_feature=node_feature,
-                                            inject_feature=inject_feature,
-                                            num_cells_per_ct_id=100,
-                                            center_celltypes=center_celltypes,
-                                            use_ids=train_ids,
-                                            raw_filepaths=[file_path],
-                                            gene_list=gene_list,
-                                            celltypes_to_index=celltypes_to_index,
-                                            genept_embeddings_path=use_genept_embeds)
+    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    save_dir = os.path.join("go_causal_interaction", test_dataset.processed_dir.split("/")[-2], args.exp_name, model_type)
 
-    test_dataset = SpatialAgingCellDataset(subfolder_name="test",
-                                        dataset_prefix=args.dataset,
-                                        target="expression",
-                                        k_hop=k_hop,
-                                        augment_hop=augment_hop,
-                                        node_feature=node_feature,
-                                        inject_feature=inject_feature,
-                                        num_cells_per_ct_id=100,
-                                        center_celltypes=center_celltypes,
-                                        use_ids=test_ids,
-                                        raw_filepaths=[file_path],
-                                        gene_list=gene_list,
-                                        celltypes_to_index=celltypes_to_index,
-                                        genept_embeddings_path=use_genept_embeds)
-
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-
-    print(len(train_dataset), flush=True)
-    print(len(test_dataset), flush=True)
-
-
-    # init GNN model
-    if inject is True:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    inject_dim=int(train_dataset.get(0).inject.shape[1]), # added for injecting features into last layer (after pooling),
-                    method="GIN", pool="add", num_layers=k_hop)
-    else:
-        model = GNN(hidden_channels=64,
-                    input_dim=int(train_dataset.get(0).x.shape[1]),
-                    output_dim=len(train_dataset.get(0).y), # added for multivariate targets
-                    method="GIN", pool="add", num_layers=k_hop)
-    model.to(device)
-    print(device, flush=True)
-
-    # create directory to save results
-    model_dirname = loss+f"_{learning_rate:.0e}".replace("-","n")
-    save_dir = os.path.join("results/gnn",train_dataset.processed_dir.split("/")[-2],model_dirname,"GO_ITXN")
     os.makedirs(save_dir, exist_ok=True)
-    
-    ### GO INTERACTION EXPERIMENTS ###
-    
-    # pick loader
-    if train_or_test == "train":
-        loader = train_loader
-    elif train_or_test == "test":
-        loader = test_loader
-    elif train_or_test == "all":
-        loader = all_loader
-    else:
-        raise Exception ("train_or_test not recognized!")
-        
-    # get savename
-    savename = perturb_approach+"_"+str(num_props)+"steps_"+train_or_test
-    
-    # get genes (convert to uppercase for consistency)
+    print(f"Save directory: {save_dir}", flush=True)
+
+    model = GNN(
+        hidden_channels=64,
+        input_dim=int(train_dataset.get(0).x.shape[1]),
+        output_dim=len(train_dataset.get(0).y),
+        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
+        method="GIN", 
+        pool="center", 
+        num_layers=k_hop,
+        celltypes_to_index=celltypes_to_index,
+        predict_celltype=False,
+        train_multitask=False,
+        ablate_gene_expression=False,
+        use_one_hot_ct=False,
+    )
+    print(f"Model initialized on {device}")
+
+    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    model.load_state_dict(torch.load(model_save_dir), strict=False)
+    model.to(device)
+
     gene_names = np.char.upper(train_dataset.gene_names.astype(str))
+    go_causal_interaction(model, train_loader, test_loader, save_dir, model_type, perturb_approach, num_props, pairs_path, gene_names, debug=args.debug, device=device)
+
+def go_causal_interaction(
+    model,
+    train_loader,
+    test_loader,
+    save_dir,
+    model_type,
+    perturb_approach,
+    num_props,
+    pairs_path,
+    gene_names,
+    debug=False,
+    device="cuda",
+):
+    # get savename
+    savename = f"{perturb_approach}_{num_props}steps_{model_type}"
+
+    if model_type == "global_mean":
+        global_mean = global_mean_baseline_batch(train_loader)
     
-    # Interaction Runs
-        
-    model.eval()
-    
-    print("Running GO interactions...", flush=True)
-    
-    # extract terms from saved interactions
+    print("Running GO interactions...", flush=True)    
     terms_list = np.unique([("_").join(x.split(".")[0].split("_")[1:]) for x in os.listdir(pairs_path)])
+    model.eval()
+
+    if debug:
+        terms_list = terms_list[:2]
     
     for term in terms_list:
     
@@ -255,10 +221,9 @@ def main():
             perturb_reverses_list = [] # for reverse perturbation (perturb response, track production)
             center_celltypes_list = [] # cell type of the center cell (measurement)
 
-            for data in loader:
-
-                # make predictions
-                out = predict (model, data, inject)
+            for data in tqdm(test_loader):
+                data = data.to(device)
+                out = predict(model, data, inject=False)
 
                 # get actual expression
                 if data.y.shape != out.shape:
@@ -272,22 +237,27 @@ def main():
                 ### PERTURBATION
                 if perturb_approach == "multiplier":
                     # multiply expression by prop
-                    fdata = perturb_by_multiplier(data, production_indices, prop=prop) # forward perturb production genes
-                    rdata = perturb_by_multiplier(data, response_indices, prop=prop) # reverse perturb response genes
+                    fdata = perturb_by_multiplier(data.cpu(), production_indices, prop=prop) # forward perturb production genes
+                    rdata = perturb_by_multiplier(data.cpu(), response_indices, prop=prop) # reverse perturb response genes
                 else:
                     raise Exception("perturb_approach not recognized")
 
                 # append target expression and prop
                 perturb_props.append(round(prop,3))
 
-                # get perturbed predicted
-                fout = predict (model, fdata, inject)
-                rout = predict (model, rdata, inject)
+                if model_type == "model":
+                    fout = predict(model, fdata.to(device), inject=False)
+                    rout = predict(model, rdata.to(device), inject=False)
+                    fperturbed = temper(actual, out, fout, method="none") # distribution_renormalize
+                    rperturbed = temper(actual, out, rout, method="none") # distribution_renormalize
+                elif model_type == "global_mean":
+                    batch_size = len(fdata.batch)
+                    fperturbed = global_mean.unsqueeze(0).repeat(batch_size, 1)
+                    rperturbed = global_mean.unsqueeze(0).repeat(batch_size, 1)
+                elif model_type == "khop_mean":
+                    fperturbed = khop_mean_baseline_batch(fdata)
+                    rperturbed = khop_mean_baseline_batch(rdata)
 
-                # temper perturbed expression
-                fperturbed = temper(actual, out, fout, method="none") # distribution_renormalize
-                rperturbed = temper(actual, out, rout, method="none") # distribution_renormalize
-                
                 start_forwards = []
                 perturb_forwards = []
                 start_reverses = []
@@ -295,15 +265,15 @@ def main():
                 celltypes_subbed = []
                 
                 # collect the center cell start and perturbed expression pairs
-                for bi in np.unique(fdata.batch):
+                for bi in np.unique(fdata.batch.cpu()):
                     # drop any graphs with starting zero expression for production/response
                     if (torch.sum(actual[bi,response_indices]) != 0) and (torch.sum(actual[bi,production_indices]) != 0):
                         # measure forward perturb w/ response genes
-                        start_forwards.append(torch.sum(actual[bi,response_indices]).detach().numpy())
-                        perturb_forwards.append(torch.sum(fperturbed[bi,response_indices]).detach().numpy())
+                        start_forwards.append(torch.sum(actual[bi,response_indices].cpu()).detach().numpy())
+                        perturb_forwards.append(torch.sum(fperturbed[bi,response_indices].cpu()).detach().numpy())
                         # measure reverse perturb w/ production genes
-                        start_reverses.append(torch.sum(actual[bi,production_indices]).detach().numpy())
-                        perturb_reverses.append(torch.sum(rperturbed[bi,production_indices]).detach().numpy())
+                        start_reverses.append(torch.sum(actual[bi,production_indices].cpu()).detach().numpy())
+                        perturb_reverses.append(torch.sum(rperturbed[bi,production_indices].cpu()).detach().numpy())
                         # also filter celltypes
                         celltypes_subbed.append(celltypes[bi])
 
@@ -313,8 +283,6 @@ def main():
                 start_reverses_list.append(np.array(start_reverses).flatten())
                 perturb_reverses_list.append(np.array(perturb_reverses).flatten())
                 center_celltypes_list.append(np.array(celltypes_subbed).flatten())
-            
-            #print(f"Finished {round(prop,3)} proportion", flush=True)
             
             # save lists
             save_dict = {
@@ -329,8 +297,6 @@ def main():
             with open(os.path.join(save_dir,term,f"{savename}_{round(prop*1000)}.pkl"), 'wb') as f:
                 pickle.dump(save_dict, f)
         
-    
-
         # Compute and plot results
         norm_forward_col = []
         norm_reverse_col = []
@@ -368,77 +334,8 @@ def main():
 
         # save stats
         stats_df.to_csv(os.path.join(save_dir,term,f"{savename}_results.csv"))
-        
-
-        # make plots
         stats_df = pd.read_csv(os.path.join(save_dir,term,f"{savename}_results.csv"))
         
-        ### FORWARD
-        # plot lines with confidence interval
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(stats_df, x="Prop", y="Normalized Forward", hue="Celltype",
-                     ci=95, ax=ax)
-        plt.title(term, fontsize=16)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            ax.set_xlabel("Production Signature Perturbation", fontsize=16)
-            ax.set_ylabel("Normalized Forward Signature", fontsize=16)
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir,term,f"{savename}_forward_celltype.pdf"), bbox_inches='tight')
-        plt.close()
-        
-        # combined
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(stats_df, x="Prop", y="Normalized Forward",
-                     ci=95, color='k', ax=ax)
-        plt.title(term, fontsize=16)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            ax.set_xlabel("Production Signature Perturbation", fontsize=16)
-            ax.set_ylabel("Normalized Forward Signature", fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir,term,f"{savename}_forward_combined.pdf"), bbox_inches='tight')
-        plt.close()
-        
-        
-        ### REVERSE
-        # plot lines with confidence interval
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(stats_df, x="Prop", y="Normalized Reverse", hue="Celltype",
-                     ci=95, ax=ax)
-        plt.title(term, fontsize=16)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            ax.set_xlabel("Response Signature Perturbation", fontsize=16)
-            ax.set_ylabel("Normalized Reverse Signature", fontsize=16)
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir,term,f"{savename}_reverse_celltype.pdf"), bbox_inches='tight')
-        plt.close()
-        
-        # combined
-        fig, ax = plt.subplots(figsize=(6,4))
-        sns.lineplot(stats_df, x="Prop", y="Normalized Reverse",
-                     ci=95, color='k', ax=ax)
-        plt.title(term, fontsize=16)
-        plt.xticks(fontsize=12)
-        plt.yticks(fontsize=12)
-        for ax in plt.gcf().axes:
-            l = ax.get_xlabel()
-            ax.set_xlabel("Response Signature Perturbation", fontsize=16)
-            ax.set_ylabel("Normalized Reverse Signature", fontsize=16)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir,term,f"{savename}_reverse_combined.pdf"), bbox_inches='tight')
-        plt.close()
-
-    print("DONE.", flush=True)
 
 if __name__ == "__main__":
     main()

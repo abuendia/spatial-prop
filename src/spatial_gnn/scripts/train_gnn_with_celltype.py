@@ -368,7 +368,7 @@ def train_model_from_scratch(
     elif loss == "l1":
         criterion = torch.nn.L1Loss()
     elif loss == "weightedl1":
-        criterion = WeightedL1Loss(zero_weight=1, nonzero_weight=10)
+        criterion = WeightedL1Loss(zero_weight=1, nonzero_weight=10, residual_penalty=1e-3)
     elif loss == "balanced_mse":
         criterion = BMCLoss(0.1)
         expr_optimizer.add_param_group({'params': criterion.noise_sigma, 'lr': learning_rate, 'name': 'noise_sigma'})
@@ -578,7 +578,6 @@ def main():
             device=args.device,
             inject=False,
             gene_names=gene_names,
-            predict_residuals=args.predict_residuals,
         )
 
 
