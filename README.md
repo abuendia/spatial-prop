@@ -38,7 +38,7 @@ We provide an example command to train SpatialProp on the `aging_coronal.h5ad` d
         --epochs 50 \
         --do_eval
 
-An optional `--debug` flag can be added for quick testing. Note that the `--do_eval` flag computes Pearson, Spearman, and MAE correlation metrics between predictions and ground truth as reported in the preprint.
+An optional `--debug` flag can be added for quick testing. Note that the `--do_eval` flag computes Pearson correlation, Spearman correlation, and MAE metrics between predictions and ground truth as reported in the preprint.
 
 ## Deploy SpatialProp with trained GNN (inflammatory signaling example)
 
@@ -51,10 +51,14 @@ In this example, we perturb pro-inflammatory cytokines IL-6, TNF, and IFN-γ in 
         'Microglia': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},          
     }
 
-Assume our input anndata object is stored at `test_data_path`. Then we can apply these perturbations and compute SpatialProp-predicted effects with the following API calls:
+Assume our input anndata object is loaded as `test_adata`. Then we can apply these perturbations and compute SpatialProp-predicted effects with the following API calls:
 
-    test_adata = sc.read_h5ad(test_data_path)
-    save_path = create_perturbation_input_matrix(test_adata, perturbation_dict, save_path=save_path, normalize_total=True)
+    save_path = create_perturbation_input_matrix(
+        test_adata,
+        perturbation_dict,
+        save_path=save_path,
+        normalize_total=True
+    )
     adata_perturbed = predict_perturbation_effects(
         adata_path=save_path,
         exp_name="aging_coronal_perturbed_debug",
