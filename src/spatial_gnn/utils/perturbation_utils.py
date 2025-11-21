@@ -311,31 +311,76 @@ def batch_steering_cell (data, actual, out, center_celltypes, target=None, prop=
             data.x[data.batch==bi,:] = origin_x_perturbed
 
     return (data, target_celltype, target_y, target_out)
+
+
+def batch_steering_cell_gpu(data, actual, out, center_celltypes, target=None, prop=1.0):
+    '''
+    Make perturbations by steering all graphs (of same cell type) by
+    replacing cells with random draws from target graph
+    
+    target [None or PyG data object] - if None, then uses first graph in data batch, otherwise should be a PyG data object
+    prop [float 0 to 1] - proportion of steering to pursue    
+    '''
+    data = data.clone()
+    
+    # extract first graph as target
+    if target is None:
+        target_celltype = center_celltypes[0]
+        target_mask = (data.batch == 0)
+        target_x = data.x[target_mask]
+        target_y = actual[0]
+        target_out = out[0]
+    else: # no target_out for OOD predictions since gene panels don't match
+        target_celltype = target.celltypes[target.center_node]
+        target_x = target.x
+        target_y = target.y
+        target_out = torch.full_like(target_y, float('nan'))
+
+    unique_batches = np.unique(data.batch.cpu())
+    missing_mask = (target_x.median(dim=0).values != -1)
+
+    for bi in unique_batches:
+        bi_int = int(bi)
+        if bi_int == 0:
+            continue
+        if center_celltypes[bi_int] != target_celltype:
+            continue
+        
+        # make full random draws from target
+        graph_mask = (data.batch == bi)
+        origin_x = data.x[graph_mask]
+        n_cells = origin_x.shape[0]
+        torch.manual_seed(444)
+        rand_idxs = torch.randint(
+            low=0,
+            high=target_x.shape[0],
+            size=(n_cells,),
+        )
+        full_perturbed_x = target_x[rand_idxs]
+        origin_x_perturbed = origin_x.clone()
+        n_replace = round(prop*n_cells)
+        origin_x_perturbed[:n_replace,missing_mask] = full_perturbed_x[:n_replace,missing_mask]
+        data.x[graph_mask] = origin_x_perturbed
+
+    return (data, target_celltype, target_y, target_out)
     
 
 ### GO INTERACTION MODULES
-def perturb_by_multiplier(data, gene_indices, perturb_celltype=None, prop=1.0):
+def perturb_by_multiplier(data, gene_indices, perturb_celltype=None, prop=1.0, device="cuda"):
     '''
     Multiplies gene expression by a scalar factor for a set of indices
     '''
     data = data.clone()
+    gene_indices_t = torch.as_tensor(gene_indices, device=device, dtype=torch.long)
+    perturb_vec = torch.ones(data.x.size(1), device=device, dtype=torch.float32)
+    perturb_vec[gene_indices_t] = prop  # 1 for unchanged, prop for perturbed genes
 
-    # perturb all graphs with same center cell type as first graph
-    for bi in np.unique(data.batch):
-        origin_x = data.x[data.batch==bi,:]
-
-        net_celltypes = data.celltypes[bi]
+    if perturb_celltype is None:
+        mask = None
+    else:
+        graph_mask = (data.celltypes == perturb_celltype)
+        node_mask = graph_mask[data.batch]
+        mask = node_mask
         
-        # create multiplication mask (1 or prop for modified genes)
-        perturb_vec = torch.ones(data.x.shape[1])
-        perturb_vec[gene_indices] = prop
-    
-        # get cell mask
-        submask = np.arange(data.x.shape[0])[data.batch==bi]
-        if perturb_celltype is not None:
-            submask = submask[data.celltypes[bi] == perturb_celltype]
-        
-        # make perturbation
-        data = perturb_data (data, perturb_vec, mask=submask, method="multiply")
-
+    data = perturb_data(data, perturb_vec, mask=mask, method="multiply")
     return (data)

@@ -11,6 +11,30 @@ from collections import defaultdict
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 
+dataset_order = ["AC", "AS", "EX", "RE", "EA", "MS", "AD", "AP", "HD"]
+
+# Define a dictionary for mapping dataset names
+dataset_mapping_short = {'aging_coronal': 'AC',
+                    'aging_sagittal': 'AS',
+                    'androvic': 'MS',
+                    'exercise': 'EX',
+                    'kukanja': 'EA',
+                    'farah': 'HD', 
+                    'pilot': 'AP',
+                    'reprogramming': 'RE',
+                    'zeng': 'AD',
+                    'farah': 'HD',}
+
+dataset_mapping_long = {'aging_coronal': 'MERFISH-AgingCoronal\n(AC)',
+                    'aging_sagittal': 'MERFISH-AgingSagittal\n(AS)',
+                    'androvic': 'MERFISH-LocalInjury\n(MS)',
+                    'exercise': 'MERFISH-Exercise\n(EX)',
+                    'kukanja': 'ISS-GlobalInjury\n(EA)',
+                    'farah': 'MERFISH-HeartDevelopment\n(HD)',
+                    'pilot': 'MERFISH-AgingPilot\n(AP)',
+                    'reprogramming': 'MERFISH-Reprogramming\n(RE)',
+                    'zeng': 'STARmap-Alzheimers\n(AD)',}
+
 # %%
 datasets = [
     "aging_coronal", 
@@ -20,29 +44,20 @@ datasets = [
     "kukanja",
     "androvic",
     "zeng", 
-    "pilot"
+    "pilot",
+    "farah"
 ]
 models = [
-    "expression_with_celltype_decoupled_no_genept_oracle_ct_ablate_gene_expression_one_hot_ct",
-    "expression_with_celltype_decoupled_no_genept_oracle_ct_softmax_ct",
-    "expression_with_celltype_decoupled_no_genept_one_hot_ct",
-    "expression_with_celltype_decoupled_no_genept_softmax_ct",
-    "expression_only_no_genept_softmax_ct"
+    "expression_only_khop2_no_genept_softmax_ct_center_pool"
 ]
 baselines = [
-    "khop_mean",
-    "center_celltype_global_mean",
-    "global_mean"
+    "global_mean",
+    #"khop_mean", ### ONLY if consistently outperforms this baseline, otherwise we can just mention baseline in text)
 ]
 
 rename_map = {
-    "expression_with_celltype_decoupled_no_genept_oracle_ct_ablate_gene_expression_one_hot_ct": "GNN (Ablate GEX)",
-    "expression_with_celltype_decoupled_no_genept_oracle_ct_softmax_ct": "GNN (Oracle Softmax CT)",
-    "expression_with_celltype_decoupled_no_genept_one_hot_ct": "GNN (Predict One-hot CT)",
-    "expression_with_celltype_decoupled_no_genept_softmax_ct": "GNN (Predict Softmax CT)",
-    "expression_only_no_genept_softmax_ct": "GNN (Predict GEX Only)",
-    "khop_mean": "Baseline (K-hop Test Graph Mean)",
-    "center_celltype_global_mean": "Baseline (Center Celltype Train Global Mean)",
+    "expression_only_khop2_no_genept_softmax_ct_center_pool": "SpatialProp GNN",
+    #"khop_mean": "Baseline (K-hop Test Graph Mean)",
     "global_mean": "Baseline (Train Global Mean)"
 }
 
@@ -52,22 +67,22 @@ def plot_metrics(metric):
 
     for dataset in datasets:
         for model in models:
-            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/{model}/{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/test_evaluation_stats_micro.csv"
+            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/{model}/{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/test_evaluation_stats_macro_micro.csv"
             results = pd.read_csv(results_file)
-            results_dict[model][dataset] = results[results["Metric"] == metric]["Value"].values[0]
+            results_dict[model][dataset] = results[results["Metric"] == f"Micro - {metric}"]["Value"].values[0]
         for baseline in baselines:
-            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/{baseline}/test_evaluation_stats_macro_micro.csv"
+            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/expr_baselines/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/{baseline}/test_evaluation_stats_macro_micro.csv"
             results = pd.read_csv(results_file)
             results_dict[baseline][dataset] = results[results["Metric"] == f"Micro - {metric}"]["Value"].values[0]
 
     results_dict_nonzero = defaultdict(dict)
     for dataset in datasets:
         for model in models:
-            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/{model}/{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/test_evaluation_stats_micro.csv"
+            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/{model}/{dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/test_evaluation_stats_macro_micro.csv"
             results = pd.read_csv(results_file)
-            results_dict_nonzero[model][dataset] = results[results["Metric"] == f"{metric} (Nonzero)"]["Value"].values[0]
+            results_dict_nonzero[model][dataset] = results[results["Metric"] == f"Micro (Nonzero) - {metric}"]["Value"].values[0]
         for baseline in baselines:
-            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/baselines/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/{baseline}/test_evaluation_stats_macro_micro.csv"
+            results_file = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/expr_baselines/{dataset}_expression_100per_2hop_2C0aug_200delaunay_expressionFeat_all_NoneInject/{baseline}/test_evaluation_stats_macro_micro.csv"
             results = pd.read_csv(results_file)
             results_dict_nonzero[baseline][dataset] = results[results["Metric"] == f"Micro (Nonzero) - {metric}"]["Value"].values[0]
 
@@ -79,26 +94,42 @@ def plot_metrics(metric):
                     value_name="score")
     long_df["model"] = long_df["model"].map(rename_map)
 
-    plt.figure(figsize=(18, 6))
+    # map to new names
+    long_df["dataset_name"] = long_df["dataset"].map(dataset_mapping_short)
+    
+    long_df["dataset_name"] = pd.Categorical(
+        long_df["dataset_name"],
+        categories=dataset_order,
+        ordered=True,
+    )
+
+    plt.figure(figsize=(12, 4))
     sns.barplot(
         data=long_df,
-        x="dataset",
+        x="dataset_name",
         y="score",
         hue="model",
-        palette="tab10"
+        order=dataset_order,
+        palette={
+                    "SpatialProp GNN": '#AFE1AF',  # celadon
+                    "Baseline (Train Global Mean)": '#A9A9A9',  # light gray
+                    #"Baseline (K-hop Test Graph Mean)": '#808080'   # gray
+                }
     )
     plt.legend(
         title="Model",
         bbox_to_anchor=(1.02, 0.7),   # (x, y) position; x > 1 shifts outside
         loc="upper left",           
-        borderaxespad=0
+        borderaxespad=0,
+        fontsize=16
     )
-    plt.xticks(rotation=30, ha="right")
-    plt.xlabel("Dataset")
-    plt.ylabel(metric)  
-    plt.title(f"Center cell expression prediction ({metric}, all genes)")
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.xlabel("Dataset", fontsize=16)
+    plt.ylabel(metric, fontsize=16)  
+    plt.title(f"Center cell expression prediction ({metric}, all genes)", fontsize=18)
     plt.tight_layout()
-    plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/viz/output/center_cell_expression_prediction_{metric}_all_genes.png", dpi=300)
+    plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/viz/output/center_cell_expression_prediction_{metric}_all_genes.pdf", bbox_inches='tight')
     plt.show()
 
     df = pd.DataFrame(results_dict_nonzero).T 
@@ -109,26 +140,41 @@ def plot_metrics(metric):
                     value_name="score")
     long_df["model"] = long_df["model"].map(rename_map)
     
-    plt.figure(figsize=(18, 6))
+    # map to new names
+    long_df["dataset_name"] = long_df["dataset"].map(dataset_mapping_short)
+    long_df["dataset_name"] = pd.Categorical(
+        long_df["dataset_name"],
+        categories=dataset_order,
+        ordered=True,
+    )
+
+    plt.figure(figsize=(12, 4))
     sns.barplot(
         data=long_df,
-        x="dataset",
+        x="dataset_name",
         y="score",
         hue="model",
-        palette="tab10"
+        order=dataset_order,
+        palette={
+                    "SpatialProp GNN": '#AFE1AF',  # pastel purple
+                    "Baseline (Train Global Mean)": '#A9A9A9',  # light gray
+                    #"Baseline (K-hop Test Graph Mean)": '#808080'   # gray
+                }
     )
     plt.legend(
         title="Model",
         bbox_to_anchor=(1.02, 0.7),   # (x, y) position; x > 1 shifts outside
         loc="upper left",           
-        borderaxespad=0
+        borderaxespad=0,
+        fontsize=16
     )
-    plt.xticks(rotation=30, ha="right")
-    plt.xlabel("Dataset")
-    plt.ylabel(metric)  
-    plt.title(f"Center cell expression prediction ({metric}, nonzero genes)")
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.xlabel("Dataset", fontsize=16)
+    plt.ylabel(metric, fontsize=16)  
+    plt.title(f"Center cell expression prediction ({metric}, nonzero genes)", fontsize=18)
     plt.tight_layout()
-    plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/viz/output/center_cell_expression_prediction_{metric}_nonzero_genes.png", dpi=300)
+    plt.savefig(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/src/spatial_gnn/viz/output/center_cell_expression_prediction_{metric}_nonzero_genes.pdf", bbox_inches='tight')
     plt.show()
 
 # %%

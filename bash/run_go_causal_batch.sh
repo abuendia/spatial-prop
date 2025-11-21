@@ -2,10 +2,12 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 2 3)   # GPUs to use
+GPUS=(0 1 3)   # GPUs to use
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
+PAIRS_PATH=/oak/stanford/groups/akundaje/abuen/spatial/CausalInteractionBench/pairs
 PY=$BASE/src/spatial_gnn/scripts/go_causal_interaction.py
-DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming")
+# DATASETS=("farah" "kukanja" "androvic" "zeng" "pilot")
 MODEL_TYPE=("model" "global_mean" "khop_mean")
 
 LOGDIR="$BASE/logs"
@@ -44,6 +46,7 @@ for dataset in "${DATASETS[@]}"; do
         --num_props 10 \
         --exp_name "$dataset" \
         --model_type "$model_type" \
+        --pairs_path "$PAIRS_PATH" \
         >"$log" 2>&1
 
       status=$?
