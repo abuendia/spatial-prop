@@ -15,26 +15,52 @@ Also included are scripts for running a set of evaluation frameworks for Spatial
 
 ## Installation
 
+To install SpatialProp, first create and activate the necessary conda environment with the provided `environment.yml`. Then install as a pip package as follows:
+
     conda env create -f environment.yml
     conda activate spatial-gnn
     pip install -e .
 
 ## Training GNN
 
-We provide an example training command: 
+We provide an example command to train SpatialProp on the `aging_coronal.h5ad` dataset from https://zenodo.org/records/13883177.
 
     python scripts/train_gnn_model_expression.py \
         --dataset aging_coronal \
-        --base_path /path/to/anndata \
+        --base_path path/to/anndata/dir \
         --k_hop 2 \
         --augment_hop 2 \
-        --center_celltypes "T cell,NSC,Pericyte" \
+        --center_celltypes "all" \
         --node_feature "expression" \
         --inject_feature "none" \
         --learning_rate 0.0001 \
-        --loss "weightedl1" \
-        --epochs 50
+        --loss weightedl1 \
+        --epochs 50 \
+        --do_eval
+
+An optional `--debug` flag can be added for quick testing. Note that the `--do_eval` flag computes Pearson, Spearman, and MAE correlation metrics between predictions and ground truth as reported in the preprint.
 
 ## Deploy SpatialProp with trained GNN (inflammatory signaling example)
 
-For this tutorial, you can access the following datasets at https://zenodo.org/records/13883177.
+For this example, you can access the following dataset at https://zenodo.org/records/13883177. We show use of the [lightweight API](./src/spatial_gnn/api/perturbation_api.py) to deploy a trained SpatialProp model in predicting inflammatory response.
+
+In this example, we perturb pro-inflammatory cytokines IL-6, TNF, and IFN-γ in T cells and microglia of a coronal tissue section of mouse brain. Here the user specifies a dictionary of desired perturbations and multipliers that scale the gene expressions in the desired set of cells. For example, the baseline expression of IL-6 will be multiplied by 10 in both T cells and microglia in this example:
+
+    perturbation_dict = {
+        'T cell': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},    
+        'Microglia': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},          
+    }
+
+Assume our input anndata object is stored at `test_data_path`. Then we can apply these perturbations and compute SpatialProp-predicted effects with the following API calls:
+
+    test_adata = sc.read_h5ad(test_data_path)
+    save_path = create_perturbation_input_matrix(test_adata, perturbation_dict, save_path=save_path, normalize_total=True)
+    adata_perturbed = predict_perturbation_effects(
+        adata_path=save_path,
+        exp_name="aging_coronal_perturbed_debug",
+        model_path=model_path,
+        perturbation_dict=perturbation_dict,
+        perturbation_mask_key="perturbed_input"
+    )
+
+This will return an updated anndata object with predicted propagated expression that can be accessed as `adata_perturbed.layers['predicted_perturbed']`. For more details, refer to the notebook example of the [API](./notebooks/api_demo.ipynb).
