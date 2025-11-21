@@ -10,7 +10,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
-from spatial_gnn.utils.perturbation_utils import batch_steering_cell, batch_steering_mean
+from spatial_gnn.utils.perturbation_utils import batch_steering_mean, batch_steering_cell
 from spatial_gnn.utils.dataset_utils import load_dataset_config
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
@@ -51,6 +51,8 @@ def main():
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
     print(f"\n {args.dataset}", flush=True)
     
+    temper_methods = ["renormalize", "distribution_renormalize"]
+
     # load parameters from arguments
     dataset_config = DATASET_CONFIGS[args.dataset]
     train_ids = dataset_config['train_ids']
@@ -160,8 +162,9 @@ def main():
     model.load_state_dict(torch.load(model_save_dir), strict=False)
     model.to(device)
 
-    eval_model(model, train_loader, test_loader, save_dir, model_type, steering_approach, num_props, props, device)
+    eval_model(model, train_loader, test_loader, save_dir, model_type, steering_approach, num_props, props, temper_methods, device)
     
+
 def eval_model(
     model,
     train_loader,
@@ -171,221 +174,108 @@ def eval_model(
     steering_approach,
     num_props,
     props,
+    temper_methods,
     device="cuda",
 ):
-    # get savename
     savename = f"{steering_approach}_{num_props}steps_{model_type}"
 
-    # precompute training set baselines
     if model_type == "global_mean":
         global_mean = global_mean_baseline_batch(train_loader)
 
-    ood_subfoldername = "none"
-    model.eval()
-    
-    print("Running steering...", flush=True)
-    for prop in props:
+    for temper_method in temper_methods:
 
-        perturb_props = []
-        target_expressions = []
-        target_predictions = []
-        target_celltypes = []
-        start_expressions_list = []
-        perturb_expressions_list = []
-        start_celltypes_list = []
+        model.eval()
+        results_actual = []     
+        results_pred = []     
 
-        for data in tqdm(test_loader):
-            data = data.to(device)
-            out = predict(model, data, inject=False)
-
-            # get actual expression
-            if data.y.shape != out.shape:
-                actual = torch.reshape(data.y.float(), out.shape)
-            else:
-                actual = data.y.float()
-
-            center_celltypes = get_center_celltypes(data)
-
-            ### STEERING PERTURBATION (and appending target expressions)
-            subset_same_celltype = False
-
-            if steering_approach == "batch_steer_mean":
-                pdata, target_celltype, target_expression, target_out = batch_steering_mean(data.cpu(), actual.cpu(), out.cpu(), center_celltypes, prop=prop)
-                subset_same_celltype = True
-            elif steering_approach == "batch_steer_cell":
-                pdata, target_celltype, target_expression, target_out = batch_steering_cell(data.cpu(), actual.cpu(), out.cpu(), center_celltypes, prop=prop)
-                subset_same_celltype = True
-            else:
-                raise Exception("steering_approach not recognized")
-
-            # append target expression and prop
-            target_expressions.append(target_expression)
-            target_predictions.append(target_out)
-            target_celltypes.append(target_celltype)
-            start_celltypes_list.append(center_celltypes)
-            perturb_props.append(round(prop,3))
-
-            # make predictions with baseline
-            if model_type == "global_mean":
-                batch_size = len(data.center_node)
-                perturbed = global_mean.unsqueeze(0).repeat(batch_size, 1)  # [batch_size, num_genes]
-            elif model_type == "khop_mean":
-                perturbed = khop_mean_baseline_batch(pdata) # [512, 300]
-            elif model_type == "model":
-                # get perturbed predicted
-                pout = predict(model, pdata.to(device), inject=False)
-                # temper perturbed expression
-                perturbed = temper(actual, out, pout, method="distribution")
-
-            start_expressions = []
-            perturb_expressions = []
-            for bi in np.unique(pdata.batch.cpu()):
-                # subset to only those that have same center cell type as first graph
-                if subset_same_celltype is True:
-                    if (center_celltypes[bi] == target_celltype) and (bi>0):
-                        start_expressions.append(actual[bi,:])
-                        perturb_expressions.append(perturbed[bi,:])
-                else:
-                    start_expressions.append(actual[bi,:])
-                    perturb_expressions.append(perturbed[bi,:])
-
-            # append start expressions and perturb expressions
-            start_expressions_list.append(start_expressions)
-            perturb_expressions_list.append(perturb_expressions)
-        
-        print(f"Finished {round(prop,3)} proportion", flush=True)
-        
-        # save lists
-        save_dict = {
-            "perturb_props": perturb_props,
-            "target_expressions": target_expressions,
-            "target_predictions": target_predictions,
-            "target_celltypes": target_celltypes,
-            "start_expressions_list": start_expressions_list,
-            "perturb_expressions_list": perturb_expressions_list,
-            "start_celltypes_list": start_celltypes_list,
-            }
-        with open(os.path.join(save_dir, f"{savename}_{round(prop,3)*1000}.pkl"), 'wb') as f:
-            pickle.dump(save_dict, f)
-        
-        
-    # Compute stats comparing to target (actual)
-    r_list_start = []
-    s_list_start = []
-    mae_list_start = []
-    r_list_perturb = []
-    s_list_perturb = []
-    mae_list_perturb = []
-    prop_list = []
-
-    for prop in props:
-
-        # load in each saved file
-        with open(os.path.join(save_dir, f"{savename}_{round(prop,3)*1000}.pkl"), 'rb') as f:
-            save_dict = pickle.load(f)
-        perturb_props = save_dict["perturb_props"]
-        target_expressions = save_dict["target_expressions"]
-        start_expressions_list = save_dict["start_expressions_list"]
-        perturb_expressions_list = save_dict["perturb_expressions_list"]
-        target_celltypes = save_dict["target_celltypes"]
-        start_celltypes_list = save_dict["start_celltypes_list"]
-        
-        # compute stats
-        for i in range(len(target_expressions)):
-            target = target_expressions[i].detach().numpy()
-            
-            # mask out missing values to compute stats
-            missing_mask = target != -1
-            
-            for start in start_expressions_list[i]:
-                # compute stats for start
-                start = start.cpu().detach().numpy()
-                r_list_start.append(pearsonr(start[missing_mask], target[missing_mask])[0])
-                s_list_start.append(spearmanr(start[missing_mask], target[missing_mask])[0])
-                mae_list_start.append(np.mean(np.abs(start[missing_mask]-target[missing_mask])))
-            
-            for perturb in perturb_expressions_list[i]:
-                # compute stats for perturb
-                perturb = perturb.cpu().detach().numpy()
-                r_list_perturb.append(pearsonr(perturb[missing_mask], target[missing_mask])[0])
-                s_list_perturb.append(spearmanr(perturb[missing_mask], target[missing_mask])[0])
-                mae_list_perturb.append(np.mean(np.abs(perturb[missing_mask]-target[missing_mask])))
-                prop_list.append(perturb_props[i])
-
-    stats_df = pd.DataFrame(np.vstack((r_list_start+r_list_perturb,
-                                       s_list_start+s_list_perturb,
-                                       mae_list_start+mae_list_perturb,
-                                       prop_list+prop_list,
-                                       ["Start"]*len(r_list_start)+["Perturbed"]*len(r_list_perturb))).T,
-                            columns=["Pearson", "Spearman", "MAE", "Prop", "Type"])
-    for col in ["Pearson", "Spearman", "MAE"]:
-        stats_df[col] = stats_df[col].astype(float)
-
-    stats_df.to_csv(os.path.join(save_dir, f"{savename}_actualtarget.csv"))
-    print("Finished actualtarget steering...", flush=True)
-
-
-    if ood_subfoldername.lower() == "none":
-
-        r_list_start = []
-        s_list_start = []
-        mae_list_start = []
-        r_list_perturb = []
-        s_list_perturb = []
-        mae_list_perturb = []
-        prop_list = []
-
+        print("Running steering...", flush=True)
         for prop in props:
 
-            # load in each saved file
-            with open(os.path.join(save_dir, f"{savename}_{round(prop,3)*1000}.pkl"), 'rb') as f:
-                save_dict = pickle.load(f)
-            perturb_props = save_dict["perturb_props"]
-            target_predictions = save_dict["target_predictions"]
-            start_expressions_list = save_dict["start_expressions_list"]
-            perturb_expressions_list = save_dict["perturb_expressions_list"]
-            target_celltypes = save_dict["target_celltypes"]
-            start_celltypes_list = save_dict["start_celltypes_list"]
-            
-            # compute stats
-            for i in range(len(target_predictions)):
-                try:
-                    target = target_predictions[i].detach().numpy()
-                except:
-                    target = target_predictions[i]
-                
-                # mask out missing values to compute stats
-                missing_mask = target != -1
-                
-                for start in start_expressions_list[i]:
-                    # compute stats for start
-                    start = start.cpu().detach().numpy()
-                    r_list_start.append(pearsonr(start[missing_mask], target[missing_mask])[0])
-                    s_list_start.append(spearmanr(start[missing_mask], target[missing_mask])[0])
-                    mae_list_start.append(np.mean(np.abs(start[missing_mask]-target[missing_mask])))
-                
-                for perturb in perturb_expressions_list[i]:
-                    # compute stats for perturb
-                    perturb = perturb.cpu().detach().numpy()
-                    r_list_perturb.append(pearsonr(perturb[missing_mask], target[missing_mask])[0])
-                    s_list_perturb.append(spearmanr(perturb[missing_mask], target[missing_mask])[0])
-                    mae_list_perturb.append(np.mean(np.abs(perturb[missing_mask]-target[missing_mask])))
-                    
-                    prop_list.append(perturb_props[i])
+            print(f"Prop={prop:.3f}", flush=True)
 
-        stats_df = pd.DataFrame(np.vstack((r_list_start+r_list_perturb,
-                                           s_list_start+s_list_perturb,
-                                           mae_list_start+mae_list_perturb,
-                                           prop_list+prop_list,
-                                           ["Start"]*len(r_list_start)+["Perturbed"]*len(r_list_perturb))).T,
-                                columns=["Pearson", "Spearman", "MAE", "Prop", "Type"])
-        for col in ["Pearson", "Spearman", "MAE"]:
-            stats_df[col] = stats_df[col].astype(float)
+            for data in tqdm(test_loader):
+                data = data.to(device)
+                out = predict(model, data, inject=False)
 
-        # save stats
-        stats_df.to_csv(os.path.join(save_dir, f"{savename}_predictedtarget.csv"))
-        print("Finished predictedtarget steering...", flush=True)
+                # actual expression
+                if data.y.shape != out.shape:
+                    actual = data.y.float().reshape_as(out)
+                else:
+                    actual = data.y.float()
 
+                center_celltypes = get_center_celltypes(data)
+
+                if steering_approach == "batch_steer_mean":
+                    pdata, target_celltype, target_expression, target_out = batch_steering_mean(
+                        data.cpu(), actual.cpu(), out.cpu(), center_celltypes, prop=prop
+                    )
+                elif steering_approach == "batch_steer_cell":
+                    pdata, target_celltype, target_expression, target_out = batch_steering_cell(
+                        data, actual, out, center_celltypes, prop=prop
+                    )
+
+                # make predictions for perturbed data
+                if model_type == "global_mean":
+                    batch_n = data.center_node.shape[0]
+                    perturbed = global_mean.unsqueeze(0).repeat(batch_n, 1)
+                elif model_type == "khop_mean":
+                    perturbed = khop_mean_baseline_batch(pdata)
+                elif model_type == "model":
+                    pout = predict(model, pdata.to(device), inject=False)
+                    perturbed = temper(actual, out, pout, method=temper_method)
+
+                unique_batches = torch.unique(pdata.batch.cpu())
+
+                for bi in unique_batches:
+                    bi_int = int(bi)
+                    # only evaluate graphs eligible for steering
+                    if (center_celltypes[bi_int] == target_celltype) and (bi_int > 0):
+
+                        start_vec = actual[bi_int].detach().cpu().numpy()
+                        pert_vec = perturbed[bi_int].detach().cpu().numpy()
+
+                        target_act = target_expression.detach().cpu().numpy()
+                        missing_mask_act = (target_act != -1)
+
+                        r = pearsonr(start_vec[missing_mask_act], target_act[missing_mask_act])[0]
+                        s = spearmanr(start_vec[missing_mask_act], target_act[missing_mask_act])[0]
+                        mae = np.mean(np.abs(start_vec[missing_mask_act] - target_act[missing_mask_act]))
+                        results_actual.append((r, s, mae, prop, "Start"))
+
+                        r = pearsonr(pert_vec[missing_mask_act], target_act[missing_mask_act])[0]
+                        s = spearmanr(pert_vec[missing_mask_act], target_act[missing_mask_act])[0]
+                        mae = np.mean(np.abs(pert_vec[missing_mask_act] - target_act[missing_mask_act]))
+                        results_actual.append((r, s, mae, prop, "Perturbed"))
+
+                        try:
+                            target_pr = target_out.detach().cpu().numpy()
+                        except:
+                            target_pr = target_out   # already numpy
+                        missing_mask_pr = (target_pr != -1)
+
+                        # predicted: start
+                        r = pearsonr(start_vec[missing_mask_pr], target_pr[missing_mask_pr])[0]
+                        s = spearmanr(start_vec[missing_mask_pr], target_pr[missing_mask_pr])[0]
+                        mae = np.mean(np.abs(start_vec[missing_mask_pr] - target_pr[missing_mask_pr]))
+                        results_pred.append((r, s, mae, prop, "Start"))
+
+                        # predicted: perturbed
+                        r = pearsonr(pert_vec[missing_mask_pr], target_pr[missing_mask_pr])[0]
+                        s = spearmanr(pert_vec[missing_mask_pr], target_pr[missing_mask_pr])[0]
+                        mae = np.mean(np.abs(pert_vec[missing_mask_pr] - target_pr[missing_mask_pr]))
+                        results_pred.append((r, s, mae, prop, "Perturbed"))
+
+        df_actual = pd.DataFrame(results_actual,
+            columns=["Pearson", "Spearman", "MAE", "Prop", "Type"]
+        )
+        df_actual.to_csv(os.path.join(save_dir, f"{savename}_{temper_method}_actualtarget.csv"), index=False)
+        print("Saved actualtarget.csv")
+
+        df_pred = pd.DataFrame(results_pred,
+            columns=["Pearson", "Spearman", "MAE", "Prop", "Type"]
+        )
+        df_pred.to_csv(os.path.join(save_dir, f"{savename}_{temper_method}_predictedtarget.csv"), index=False)
+        print("Saved predictedtarget.csv")
  
 if __name__ == "__main__":
     main()

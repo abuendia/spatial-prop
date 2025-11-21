@@ -268,52 +268,7 @@ def batch_steering_mean (data, actual, out, center_celltypes, target=None, prop=
     return (data, target_celltype, target_y, target_out)
 
 
-def batch_steering_cell (data, actual, out, center_celltypes, target=None, prop=1.0):
-    '''
-    Make perturbations by steering all graphs (of same cell type) by
-    replacing cells with random draws from target graph
-    
-    target [None or PyG data object] - if None, then uses first graph in data batch, otherwise should be a PyG data object
-    prop [float 0 to 1] - proportion of steering to pursue    
-    '''
-    data = data.clone()
-    
-    # extract first graph as target
-    if target is None:
-        target_celltype = center_celltypes[0]
-        target_x = data.x[data.batch==0,:]
-        target_y = actual[0,:]
-        target_out = out[0,:]
-    else: # no target_out for OOD predictions since gene panels don't match
-        target_celltype = target.celltypes[target.center_node]
-        target_x = target.x
-        target_y = target.y
-        target_out = torch.full_like(target_y, float('nan'))
-
-    # perturb all graphs with same center cell type as first graph
-    for bi in np.unique(data.batch):
-        if (center_celltypes[bi] == target_celltype) and (bi>0):
-            # make full random draws from target
-            origin_x = data.x[data.batch==bi,:]
-            torch.manual_seed(444)
-            rand_idxs = torch.randint(target_x.shape[0], size=(origin_x.shape[0],))
-            full_perturbed_x = target_x[rand_idxs,:]
-            
-            # prop to determine number to replace first
-            origin_x_perturbed = origin_x.clone()
-            
-            # update perturbation (mask out missing genes and only update both on measured genes)
-            missing_mask = np.median(target_x, axis=0) != -1
-            origin_x_perturbed[:round(prop*origin_x.shape[0]),missing_mask] = full_perturbed_x[:round(prop*origin_x.shape[0]),missing_mask]
-            #origin_x_perturbed[:round(prop*origin_x.shape[0]),:] = full_perturbed_x[:round(prop*origin_x.shape[0]),:]
-            
-            # update data with perturbation
-            data.x[data.batch==bi,:] = origin_x_perturbed
-
-    return (data, target_celltype, target_y, target_out)
-
-
-def batch_steering_cell_gpu(data, actual, out, center_celltypes, target=None, prop=1.0):
+def batch_steering_cell(data, actual, out, center_celltypes, target=None, prop=1.0):
     '''
     Make perturbations by steering all graphs (of same cell type) by
     replacing cells with random draws from target graph
