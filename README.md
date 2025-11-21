@@ -67,4 +67,4 @@ Assume our input anndata object is loaded as `test_adata`. Then we can apply the
         perturbation_mask_key="perturbed_input"
     )
 
-This will return an updated anndata object with predicted propagated expression that can be accessed as `adata_perturbed.layers['predicted_perturbed']`. For more details, refer to the notebook example of the [API](./notebooks/api_demo.ipynb).
+This will return an updated anndata object with predicted propagated expression that can be accessed as `adata_perturbed.layers['predicted_perturbed']`. For more details, refer to the [notebook example](./notebooks/api_demo.ipynb) of the API.
