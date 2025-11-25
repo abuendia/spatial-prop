@@ -1,8 +1,8 @@
-# SpatialProp: Tissue perturbation modeling with spatially resolved single-cell transcriptomics
+# <img src="./assets/spatial-prop-logo.png" width="25" /> SpatialProp: Tissue perturbation modeling with spatially resolved single-cell transcriptomics
 
 **SpatialProp** (Spatial Propagation of Single-cell Perturbations) is a computational framework leveraging graph deep learning to predict the spatial effects of single-cell genetic perturbations using spatially resolved single-cell transcriptomics data.
 
-![architecture](./assets/SpatialProp_architecture.png)
+![architecture](./assets/spatial-prop-schematic.png)
 
 SpatialProp takes as input a spatially resolved single-cell transcriptomics dataset of intact tissue and a user-defined set of single-cell perturbations represented by their perturbed gene expression profiles. Then, using the core graph neural network module, SpatialProp predicts perturbed gene expression in a cell-by-cell manner and calibrates these predictions for model error to update gene expression profiles for every cell in the tissue. Finally, SpatialProp outputs a prediction of the perturbed gene expression profiles for all cells in the spatially resolved single-cell transcriptomics data, including for cells that did not receive a direct user-specified perturbation.
 
@@ -14,17 +14,15 @@ To deploy SpatialProp on a new dataset, the following steps need to be taken:
 
 Also included are scripts for running a set of evaluation frameworks for SpatialProp (or any spatial perturbation model). This includes iterative steering of niches to a target state, and the cell-cell interaction benchmark under CausalInteractionBench: https://github.com/sunericd/CausalInteractionBench
 
-![applications](./assets/SpatialProp_applications.png)
+![applications](./assets/spatial-prop-apps.png)
 
 ## Installation
 
-To install SpatialProp, first create and activate the necessary conda environment with the provided `environment.yml`. Then install as a pip package as follows:
+To install SpatialProp, run the following command from the current directory:
 
-    conda env create -f environment.yml
-    conda activate spatial-gnn
     pip install .
 
-## Training GNN
+## Training the SpatialProp GNN
 
 We provide an example command to train SpatialProp on the `aging_coronal.h5ad` dataset from https://zenodo.org/records/13883177.
 
