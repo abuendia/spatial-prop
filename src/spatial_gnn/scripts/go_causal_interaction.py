@@ -251,8 +251,9 @@ def go_causal_interaction(
         response_indices = np.where(np.isin(gene_names, response_genes_overlap))[0]
         
         # run perturbations
-        oneside_props = np.linspace(0,1,round((num_props+1)/2))
-        props = np.unique(np.concatenate((-oneside_props,oneside_props)))
+        props = np.linspace(0,1,round((num_props+1)/2))
+        #oneside_props = np.linspace(0,1,round((num_props+1)/2))
+        #props = np.unique(np.concatenate((-oneside_props,oneside_props)))
         
         for prop in np.power(10,props): # powers of 10
 
@@ -290,8 +291,8 @@ def go_causal_interaction(
                 if model_type == "model":
                     fout = predict(model, fdata.to(device), inject=False)
                     rout = predict(model, rdata.to(device), inject=False)
-                    fperturbed = temper(actual, out, fout, method="none") # distribution_renormalize
-                    rperturbed = temper(actual, out, rout, method="none") # distribution_renormalize
+                    fperturbed = temper(actual, out, fout, method="distribution_renormalize") # distribution_renormalize
+                    rperturbed = temper(actual, out, rout, method="distribution_renormalize") # distribution_renormalize
                 elif model_type == "global_mean":
                     batch_size = len(fdata.batch)
                     fperturbed = global_mean.unsqueeze(0).repeat(batch_size, 1)
