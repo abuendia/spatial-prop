@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spatial-gnn"
+version = "0.1.0"
+description = "GNN models for spatial transcriptomics"
+readme = "README.md"
+license = {file="LICENSE"}
+authors = [{name = "Eric Sun", email = "edsun@stanford.edu"}, {name = "Alejandro Buendia", email = "abuen@stanford.edu"}]
+requires-python = ">=3.10,<4"
+dependencies = [
+    "numpy==2.2.6",
+    "pandas==2.3.0",
+    "scanpy==1.11.3",
+    "squidpy==1.6.5",
+    "torch==2.6.0",
+    "torch-geometric==2.6.1",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["test*"]

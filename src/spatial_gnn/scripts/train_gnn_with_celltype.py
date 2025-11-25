@@ -399,15 +399,15 @@ def train_model_from_scratch(
         prefix = f'[{model_type}]' if use_genept else ''
 
         if loss == "mse":
-            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}, Test Spearman: {test_spearman:.4f}'
         elif loss == "l1":
-            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}'
         elif loss == "weightedl1":
-            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}'
         elif loss == "balanced_mse":
-            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}'
         elif loss == "npcc":
-            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}'
         if predict_celltype:
             metrics_str += f', Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
         print(metrics_str, flush=True)
