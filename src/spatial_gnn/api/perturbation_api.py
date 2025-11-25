@@ -1,5 +1,5 @@
 """
-API for spatial GNN perturbation predictions.
+Training and inference API for spatial GNN perturbation predictions.
 """
 import numpy as np
 import pandas as pd
@@ -12,12 +12,117 @@ from typing import List, Dict, Union, Optional, Tuple, Any
 import os
 import tqdm 
 
-
 from spatial_gnn.scripts.train_gnn_with_celltype import train_model_from_scratch
 from spatial_gnn.utils.dataset_utils import load_model_from_path
 from spatial_gnn.models.gnn_model import predict
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config
+from spatial_gnn.scripts.model_performance import eval_model
+
+
+def train_perturbation_model(
+    k_hop: int,
+    augment_hop: int,
+    center_celltypes: Union[str, List[str], None],
+    node_feature: str,
+    learning_rate: float,
+    loss: str,
+    epochs: int,
+    num_cells_per_ct_id: int,
+    inject_feature: Optional[str] = None,
+    dataset: Optional[str] = None,
+    base_path: Optional[str] = None,
+    exp_name: Optional[str] = None,
+    adata_path: Optional[str] = None,
+    gene_list: Optional[List[str]] = None,
+    normalize_total: bool = True,
+    predict_celltype: bool = False,
+    pool: Optional[str] = None,
+    predict_residuals: bool = False,
+    do_eval: bool = False,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    **kwargs
+) -> Tuple[Any, Dict, str]:
+    """
+    Train a GNN model for perturbation prediction from scratch.
+    
+    Parameters
+    ----------
+    k_hop : int, default=2
+        k-hop neighborhood size
+    augment_hop : int, default=2
+        Number of hops for graph augmentation
+    center_celltypes : str, default="all"
+        Cell types to center graphs on (comma-separated or "all")
+    node_feature : str, default="expression"
+        Node feature type
+    inject_feature : Optional[str], default=None
+        Feature injection type
+    gene_list : Optional[str], default=None
+        Path to gene list file
+    num_cells_per_ct_id : int, default=100
+        Number of cells per cell type per ID
+    normalize_total : bool, default=True
+        Whether to normalize total gene expression
+    learning_rate : float, default=1e-4
+        Learning rate for training
+    loss : str, default="weightedl1"
+        Loss function type
+    epochs : int, default=100
+        Number of training epochs
+    debug : bool, default=False
+        Enable debug mode
+    debug_subset_size : int, default=100
+        Number of cells for debug mode
+    device : str, default="cuda" if available else "cpu"
+        Device to run training on
+        
+    Returns
+    -------
+    Tuple[Any, Dict, str]
+        (trained_model, model_config, model_path)
+    """
+    print("Training new perturbation model from scratch...")
+    # Create save directory structure
+    exp_dir_name = f"{dataset}_expression_{k_hop}hop_{augment_hop}augment_{node_feature}_{inject_feature}"
+    model_dir_name = loss + f"_{learning_rate:.0e}".replace("-", "n")
+    model_save_dir = os.path.join(f"output/{exp_name}", exp_dir_name, model_dir_name)
+    os.makedirs(model_save_dir, exist_ok=True)
+    print(f"Model will be saved to: {model_save_dir}")
+
+    test_loader, gene_names, (model, model_config, trained_model_path) = train_model_from_scratch(
+        dataset=dataset,
+        base_path=base_path,
+        model_save_dir=model_save_dir,
+        exp_name=exp_name,
+        k_hop=k_hop,
+        augment_hop=augment_hop,
+        center_celltypes=center_celltypes,
+        node_feature=node_feature,
+        inject_feature=inject_feature,
+        learning_rate=learning_rate,
+        loss=loss,
+        epochs=epochs,
+        num_cells_per_ct_id=num_cells_per_ct_id,
+        adata_path=adata_path,
+        gene_list=gene_list,
+        normalize_total=normalize_total,
+        predict_celltype=predict_celltype,
+        pool=pool,
+        predict_residuals=predict_residuals,
+        device=device
+    )
+    if do_eval:
+        eval_model(
+            model=model,
+            test_loader=test_loader,
+            save_dir=trained_model_path,
+            device=device,
+            inject=False,
+            gene_names=gene_names,
+        )
+    print(f"Training completed. Model saved to: {trained_model_path}")
+    return test_loader, gene_names, (model, model_config, trained_model_path)
 
 
 def create_perturbation_input_matrix(
@@ -73,91 +178,6 @@ def create_perturbation_input_matrix(
         print(f"Saved AnnData with perturbation input to: {save_path}")
 
     return save_path
-  
-
-def train_perturbation_model(
-    adata_path: str,
-    exp_name: str,
-    k_hop: int = 2,
-    augment_hop: int = 2,
-    center_celltypes: str = "all",
-    node_feature: str = "expression",
-    inject_feature: Optional[str] = None,
-    gene_list: Optional[str] = None,
-    num_cells_per_ct_id: int = 100,
-    normalize_total: bool = True,
-    learning_rate: float = 1e-4,
-    loss: str = "weightedl1",
-    epochs: int = 100,
-    debug: bool = False,
-    debug_subset_size: int = 100,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    **kwargs
-) -> Tuple[Any, Dict, str]:
-    """
-    Train a GNN model for perturbation prediction from scratch.
-    
-    Parameters
-    ----------
-    adata_path : str
-        Path to the training AnnData file (.h5ad)
-    exp_name : str
-        Name of the experiment
-    k_hop : int, default=2
-        k-hop neighborhood size
-    augment_hop : int, default=2
-        Number of hops for graph augmentation
-    center_celltypes : str, default="all"
-        Cell types to center graphs on (comma-separated or "all")
-    node_feature : str, default="expression"
-        Node feature type
-    inject_feature : Optional[str], default=None
-        Feature injection type
-    gene_list : Optional[str], default=None
-        Path to gene list file
-    num_cells_per_ct_id : int, default=100
-        Number of cells per cell type per ID
-    normalize_total : bool, default=True
-        Whether to normalize total gene expression
-    learning_rate : float, default=1e-4
-        Learning rate for training
-    loss : str, default="weightedl1"
-        Loss function type
-    epochs : int, default=100
-        Number of training epochs
-    debug : bool, default=False
-        Enable debug mode
-    debug_subset_size : int, default=100
-        Number of cells for debug mode
-    device : str, default="cuda" if available else "cpu"
-        Device to run training on
-        
-    Returns
-    -------
-    Tuple[Any, Dict, str]
-        (trained_model, model_config, model_path)
-    """
-    print("Training new perturbation model from scratch...")
-    model, model_config, trained_model_path = train_model_from_scratch(
-        exp_name=exp_name,
-        k_hop=k_hop,
-        augment_hop=augment_hop,
-        center_celltypes=center_celltypes,
-        node_feature=node_feature,
-        inject_feature=inject_feature,
-        learning_rate=learning_rate,
-        loss=loss,
-        epochs=epochs,
-        num_cells_per_ct_id=num_cells_per_ct_id,
-        adata_path=adata_path,
-        gene_list=gene_list,
-        normalize_total=normalize_total,
-        debug=debug,
-        debug_subset_size=debug_subset_size,
-        device=device
-    )
-    print(f"Training completed. Model saved to: {trained_model_path}")
-    return model, model_config, trained_model_path
 
 
 def predict_perturbation_effects(
@@ -279,26 +299,3 @@ def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
     
     return summary_df
 
-
-if __name__ == "__main__":
-    test_data_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad" 
-    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/base_model/results/gnn/aging_coronal_expression_2hop_2augment_expression_none/weightedl1_1en04_GenePT_all_genes/best_model.pth"
-    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/perturbed_adata/aging_coronal_perturbed.h5ad"
-
-    # Il6, Tnf, Ifng
-    perturbation_dict = {
-        'T cell': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},    
-        'Microglia': {'Il6': 10.0, 'Tnf': 10.0, 'Ifng': 10.0},          
-    }
-    test_adata = sc.read_h5ad(test_data_path)
-    save_path = create_perturbation_input_matrix(test_adata, perturbation_dict, save_path=save_path, normalize_total=True)
-
-    print("\n=== Predicting perturbation effects ===")
-    adata_perturbed = predict_perturbation_effects(
-        adata_path=save_path,
-        exp_name="aging_coronal_perturbed_debug",
-        model_path=model_path,
-        perturbation_dict=perturbation_dict,
-        perturbation_mask_key="perturbed_input"
-    )
-    adata_perturbed.write("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/perturbed_adata/aging_coronal_pred_on_perturbed.h5ad")

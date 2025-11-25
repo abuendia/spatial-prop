@@ -4,8 +4,8 @@ set -uo pipefail
 # ---- config ----
 GPUS=(0 1 2 3)   # GPUs to use
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
-PY=$BASE/src/spatial_gnn/scripts/steering_perturbation_within_gpu.py
-DATASETS=("androvic" "reprogramming" "exercise" "aging_coronal" "aging_sagittal" "farah")
+PY=$BASE/src/spatial_gnn/scripts/steering_perturbation_within.py
+DATASETS=("kukanja")
 MODEL_TYPE=("model" "global_mean" "khop_mean")
 
 LOGDIR="$BASE/logs"

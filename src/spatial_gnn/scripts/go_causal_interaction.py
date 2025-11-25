@@ -15,6 +15,42 @@ from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
 from spatial_gnn.utils.perturbation_utils import perturb_by_multiplier
 
+def is_results_file_complete(filepath):
+    """
+    Check if a CSV results file exists and was fully written.
+    
+    Args:
+        filepath: Path to the CSV file
+        
+    Returns:
+        bool: True if file exists, has content, and is valid CSV with expected columns
+    """
+    if not os.path.exists(filepath):
+        return False
+    
+    # Check if file has content (non-zero size)
+    if os.path.getsize(filepath) == 0:
+        return False
+    
+    try:
+        # Try to read and validate the CSV structure
+        df = pd.read_csv(filepath)
+        expected_columns = ["Prop", "Normalized Forward", "Normalized Reverse", "Celltype"]
+        
+        # Check if all expected columns exist
+        if not all(col in df.columns for col in expected_columns):
+            return False
+        
+        # Check if there's at least one row of data
+        if len(df) == 0:
+            return False
+        
+        # File appears to be complete and valid
+        return True
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, Exception):
+        # File exists but is corrupted or incomplete
+        return False
+
 def main():
     # set up arguments
     parser = argparse.ArgumentParser()
@@ -132,7 +168,7 @@ def main():
     
     train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    save_dir = os.path.join("go_causal_interaction", test_dataset.processed_dir.split("/")[-2], args.exp_name, model_type)
+    save_dir = os.path.join("results", "go_causal_interaction", args.exp_name, model_type)
 
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {save_dir}", flush=True)
@@ -153,7 +189,7 @@ def main():
     )
     print(f"Model initialized on {device}")
 
-    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
     model.load_state_dict(torch.load(model_save_dir), strict=False)
     model.to(device)
 
@@ -186,7 +222,13 @@ def go_causal_interaction(
     if debug:
         terms_list = terms_list[:2]
     
-    for term in terms_list:
+    for term in tqdm(terms_list, total=len(terms_list)):
+        
+        # skip if results file already exists and is complete
+        results_file = os.path.join(save_dir, term, f"{savename}_results.csv")
+        if is_results_file_complete(results_file):
+            print(f"Skipping {term} - results file already exists and is complete", flush=True)
+            continue
     
         # read in production and response gene lists (convert to uppercase for consistency)
         production_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"production_{term}.csv"), header=None).values.flatten().astype(str))
@@ -221,7 +263,7 @@ def go_causal_interaction(
             perturb_reverses_list = [] # for reverse perturbation (perturb response, track production)
             center_celltypes_list = [] # cell type of the center cell (measurement)
 
-            for data in tqdm(test_loader):
+            for data in test_loader:
                 data = data.to(device)
                 out = predict(model, data, inject=False)
 
@@ -237,8 +279,8 @@ def go_causal_interaction(
                 ### PERTURBATION
                 if perturb_approach == "multiplier":
                     # multiply expression by prop
-                    fdata = perturb_by_multiplier(data.cpu(), production_indices, prop=prop) # forward perturb production genes
-                    rdata = perturb_by_multiplier(data.cpu(), response_indices, prop=prop) # reverse perturb response genes
+                    fdata = perturb_by_multiplier(data, production_indices, prop=prop) # forward perturb production genes
+                    rdata = perturb_by_multiplier(data, response_indices, prop=prop) # reverse perturb response genes
                 else:
                     raise Exception("perturb_approach not recognized")
 
@@ -334,8 +376,6 @@ def go_causal_interaction(
 
         # save stats
         stats_df.to_csv(os.path.join(save_dir,term,f"{savename}_results.csv"))
-        stats_df = pd.read_csv(os.path.join(save_dir,term,f"{savename}_results.csv"))
         
-
 if __name__ == "__main__":
     main()

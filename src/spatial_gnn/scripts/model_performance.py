@@ -449,39 +449,7 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype.pkl"), 'wb') as f:
         pickle.dump(ct_mean_stats_dict, f)
     with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype_nonzero_genes.pkl"), 'wb') as f:
-        pickle.dump(ct_mean_stats_dict_nonzero, f)
-
-    # #--------------------------------
-    # metric_col = []
-    # ct_col = []
-    # val_col = []
-
-    # for col in columns_to_plot:
-    #     for ct in ct_stats_dict.keys():
-    #         val = ct_stats_dict[ct][col]
-            
-    #         metric_col.append(col)
-    #         ct_col.append(ct)
-    #         val_col.append(val)
-
-    # plot_df = pd.DataFrame(np.vstack((metric_col, ct_col, val_col)).T, columns=["Metric","Cell type","Value"])
-    # plot_df["Value"] = plot_df["Value"].astype(float)
-
-    # # plot
-    # fig, ax = plt.subplots(figsize=(12,4))
-    # sns.barplot(plot_df, x="Cell type", y="Value", hue="Metric", palette="Reds", ax=ax)
-    # sns.move_legend(ax, "upper left", bbox_to_anchor=(1, 0.7))
-    # plt.title(save_dir.split("/")[-2], fontsize=14)
-    # plt.xticks(rotation=30, ha='right', fontsize=12)
-    # plt.yticks(fontsize=12)
-    # plt.xlabel("Cell type", fontsize=14)
-    # plt.ylabel("Metric Value", fontsize=14)
-    # plt.setp(ax.get_legend().get_texts(), fontsize='14')
-    # plt.setp(ax.get_legend().get_title(), fontsize='16')
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(save_dir, "prediction_performance_CELL.pdf"), bbox_inches='tight')
-    # plt.close()
-        
+        pickle.dump(ct_mean_stats_dict_nonzero, f)        
     print("Finished cell type analysis.", flush=True)
     
 

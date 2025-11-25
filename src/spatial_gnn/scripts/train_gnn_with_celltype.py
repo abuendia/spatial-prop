@@ -284,7 +284,7 @@ def train_model_from_scratch(
                     num_batches += 1
                     all_ct_preds.append(ct_logits)
                     all_ct_targets.extend(center_celltypes_idx)
-            
+
             avg_val_loss = total_val_loss / num_batches if num_batches > 0 else 0.0
             all_ct_preds = torch.cat(all_ct_preds, dim=0)
             ct_accuracy = compute_celltype_accuracy(all_ct_preds, np.array(all_ct_targets))
@@ -397,16 +397,20 @@ def train_model_from_scratch(
         
         # Log results
         prefix = f'[{model_type}]' if use_genept else ''
+
         if loss == "mse":
-            print(f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}', flush=True)
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train MSE: {train_score:.4f}, Test MSE: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
         elif loss == "l1":
-            print(f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}', flush=True)
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train L1: {train_score:.4f}, Test L1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
         elif loss == "weightedl1":
-            print(f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}', flush=True)
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train WL1: {train_score:.4f}, Test WL1: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
         elif loss == "balanced_mse":
-            print(f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}', flush=True)
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train BMC: {train_score:.4f}, Test BMC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
         elif loss == "npcc":
-            print(f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}', flush=True)
+            metrics_str = f'{prefix} Epoch: {epoch:03d}, Train NPCC: {train_score:.4f}, Test NPCC: {test_score:.4f}, Test Spearman: {test_spearman:.4f}, Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+        if predict_celltype:
+            metrics_str += f', Test Celltype Accuracy: {test_celltype_accuracy:.4f}'
+        print(metrics_str, flush=True)
             
         training_results["epoch"].append(epoch)
         training_results["train"].append(train_score)    

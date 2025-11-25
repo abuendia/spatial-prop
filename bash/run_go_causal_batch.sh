@@ -2,12 +2,13 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 3)   # GPUs to use
+GPUS=(0 1 2)   # GPUs to use
+JOBS_PER_GPU=1 # how many concurrent jobs per GPU
+
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PAIRS_PATH=/oak/stanford/groups/akundaje/abuen/spatial/CausalInteractionBench/pairs
 PY=$BASE/src/spatial_gnn/scripts/go_causal_interaction.py
-DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming")
-# DATASETS=("farah" "kukanja" "androvic" "zeng" "pilot")
+DATASETS=("reprogramming")
 MODEL_TYPE=("model" "global_mean" "khop_mean")
 
 LOGDIR="$BASE/logs"
@@ -18,15 +19,19 @@ mkdir -p "$LOGDIR"
 fifo=$(mktemp -u)
 mkfifo "$fifo"
 exec 3<>"$fifo"
-rm -f "$fifo" 
+rm -f "$fifo"
 
-# seed tokens
-for g in "${GPUS[@]}"; do echo "$g" >&3; done
+# seed tokens: each GPU gets $JOBS_PER_GPU slots
+for g in "${GPUS[@]}"; do
+  for ((i=0; i<JOBS_PER_GPU; i++)); do
+    echo "$g" >&3
+  done
+done
 
-# launch jobs (one per GPU at a time)
+# launch jobs (up to JOBS_PER_GPU per GPU at a time)
 for dataset in "${DATASETS[@]}"; do
   for model_type in "${MODEL_TYPE[@]}"; do
-    read -r gpu <&3   # blocks until a GPU is free
+    read -r gpu <&3   # blocks until a GPU slot is free
 
     {
       ts=$(date +%Y%m%d_%H%M%S)
@@ -50,7 +55,7 @@ for dataset in "${DATASETS[@]}"; do
         >"$log" 2>&1
 
       status=$?
-      echo "$gpu" >&3      # return GPU token
+      echo "$gpu" >&3      # return one GPU slot token
       echo "[$(date +%T)] done  $dataset ($model_type) on GPU $gpu (exit $status) | log: $log"
       exit $status
     } &
