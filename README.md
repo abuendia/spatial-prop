@@ -1,8 +1,8 @@
-# <img src="./assets/spatial-prop-logo.png" width="40" /> SpatialProp: Tissue perturbation modeling with spatially resolved single-cell transcriptomics
+# <img src="./assets/spatialprop-logo.png" width="30" /> SpatialProp: Tissue perturbation modeling with spatially resolved single-cell transcriptomics
 
 **SpatialProp** (Spatial Propagation of Single-cell Perturbations) is a computational framework leveraging graph deep learning to predict the spatial effects of single-cell genetic perturbations using spatially resolved single-cell transcriptomics data.
 
-![architecture](./assets/spatial-prop-schematic.png)
+![architecture](./assets/spatialprop-arch.png)
 
 SpatialProp takes as input a spatially resolved single-cell transcriptomics dataset of intact tissue and a user-defined set of single-cell perturbations represented by their perturbed gene expression profiles. Then, using the core graph neural network module, SpatialProp predicts perturbed gene expression in a cell-by-cell manner and calibrates these predictions for model error to update gene expression profiles for every cell in the tissue. Finally, SpatialProp outputs a prediction of the perturbed gene expression profiles for all cells in the spatially resolved single-cell transcriptomics data, including for cells that did not receive a direct user-specified perturbation.
 
@@ -14,7 +14,7 @@ To deploy SpatialProp on a new dataset, the following steps need to be taken:
 
 Also included are scripts for running a set of evaluation frameworks for SpatialProp (or any spatial perturbation model). This includes iterative steering of niches to a target state, and the cell-cell interaction benchmark under CausalInteractionBench: https://github.com/sunericd/CausalInteractionBench
 
-![applications](./assets/spatial-prop-apps.png)
+![applications](./assets/spatialprop-apps.png)
 
 ## Installation
 
