@@ -15,10 +15,10 @@ from torch_geometric.loader import DataLoader
 
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config, split_anndata_train_test
+from spatial_gnn.utils.dataset_utils import get_dataset_config
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
-from spatial_gnn.scripts.model_performance import eval_model
 from spatial_gnn.utils.metric_utils import compute_celltype_accuracy
+from spatial_gnn.scripts.eval_gnn_expression import eval_model
 
 
 def train_model_from_scratch(
@@ -33,17 +33,13 @@ def train_model_from_scratch(
     inject_feature: Optional[str] = None,
     dataset: Optional[str] = None,
     base_path: Optional[str] = None,
+    file_path: Optional[str] = None,
     exp_name: Optional[str] = None,
-    adata_path: Optional[str] = None,
     gene_list: Optional[List[str]] = None,
+    train_ids: Optional[List[str]] = None,
+    test_ids: Optional[List[str]] = None,
     normalize_total: bool = True,
-    debug: bool = False,
-    debug_subset_size: int = 2,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    test_size: float = 0.2,
-    random_state: int = 42,
     model_save_dir: Optional[str] = None,
-    stratify_by: Optional[str] = None,
     genept_embeddings: Optional[str] = None,
     genept_strategy: Optional[str] = None,
     predict_celltype: bool = False,
@@ -53,6 +49,8 @@ def train_model_from_scratch(
     use_one_hot_ct: bool = False,
     pool: Optional[str] = None,
     predict_residuals: bool = False,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    debug: bool = False,
 ) -> Tuple[GNN, str]:
     """
     Train a GNN model from scratch.
@@ -85,24 +83,20 @@ def train_model_from_scratch(
         Base path to the data directory - required if not using AnnData
     exp_name : Optional[str], default=None
         Experiment name
-    adata_path : Optional[str], default=None
+    file_path : Optional[str], default=None
         Path to AnnData object to use directly - required if not using dataset+base_path
+    train_ids : Optional[List[str]], default=None
+        List of train IDs
+    test_ids : Optional[List[str]], default=None
+        List of test IDs
     gene_list : Optional[List[str]], default=None
         List of genes to use
     normalize_total : bool, default=True
         Whether to normalize total gene expression
     debug : bool, default=False
         Enable debug mode
-    debug_subset_size : int, default=2
-        Number of batches in debug mode
     device : str, default="cuda" if available else "cpu"
         Device to train on
-    test_size : float, default=0.2
-        Proportion of data to use for testing (only used in AnnData mode)
-    random_state : int, default=42
-        Random seed for reproducibility (only used in AnnData mode)
-    stratify_by : Optional[str], default=None
-        Column name in adata.obs to stratify the split by (only used in AnnData mode)
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
     train_multitask : bool, default=False
@@ -119,16 +113,12 @@ def train_model_from_scratch(
         - Trained model
         - Path to saved model
     """
-    # Split data if not present in config
-    if adata_path is not None:    
-        adata = sc.read_h5ad(adata_path)  
-        train_ids, test_ids = split_anndata_train_test(
-            adata, test_size=test_size, random_state=random_state, stratify_by=stratify_by
-        )
+    # If using custom file_path, train_ids, and test_ids
+    if file_path and train_ids and test_ids:
+        in_adata = sc.read_h5ad(file_path)
+        celltypes_to_index = {ct: i for i, ct in enumerate(in_adata.obs["celltype"].unique())}
         train_ids = list(train_ids)
         test_ids = list(test_ids)
-        celltypes_to_index = {ct: i for i, ct in enumerate(adata.obs["celltype"].unique())}
-        file_path = adata_path
     else:
         _, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
     
@@ -468,8 +458,8 @@ def main():
     
     data_group = parser.add_mutually_exclusive_group(required=True)
     data_group.add_argument("--dataset", help="Dataset to use (aging_coronal, aging_sagittal, exercise, reprogramming, allen, kukanja, pilot)", type=str)
-    data_group.add_argument("--anndata", help="Path to AnnData file (.h5ad) to use directly", type=str)
-    
+    data_group.add_argument("--file_path", help="Path to the data file (.h5ad) to use directly", type=str)
+
     parser.add_argument("--exp_name", help="Experiment name", type=str, default=None)
     parser.add_argument("--base_path", help="Base path to the data directory (required if using --dataset)", type=str)
     parser.add_argument("--k_hop", help="k-hop neighborhood size", type=int, required=True)
@@ -482,10 +472,7 @@ def main():
     parser.add_argument("--epochs", help="number of epochs", type=int, required=True)
     parser.add_argument("--num_cells_per_ct_id", help="number of cells per cell type to use for training", type=int, default=100)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
-    parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--do_eval", action='store_true', help="Enable evaluation mode")
-    parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
-    parser.add_argument("--debug_subset_size", type=int, default=10, help="Number of batches to use in debug mode (default: 2)")
     parser.add_argument("--genept_embeddings", help="Path to file containing GenePT embeddings", type=str, default=None)
     parser.add_argument("--genept_strategy", help="Strategy to use for GenePT embeddings", type=str, default=None) # early_fusion, late_fusion, xattn
     parser.add_argument("--log_to_terminal", action='store_true', help="Log to terminal in addition to file")
@@ -496,35 +483,23 @@ def main():
     parser.add_argument("--use_one_hot_ct", action='store_true', help="Use one-hot encoding for cell type prediction")
     parser.add_argument("--pool", help="Pooling method", type=str, default=None)
     parser.add_argument("--predict_residuals", action='store_true', help="Predict residuals of gene expression")
+    parser.add_argument("--device", help="device to use", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--debug", action='store_true', help="Enable debug mode with subset of data for quick testing")
 
-    # AnnData-specific arguments
-    parser.add_argument("--test_size", type=float, default=0.2, help="Proportion of data to use for testing when using AnnData (default: 0.2)")
-    parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility when using AnnData (default: 42)")
-    parser.add_argument("--stratify_by", type=str, default=None, help="Column name in AnnData.obs to stratify the train/test split by (e.g., 'celltype')")
-    
     args = parser.parse_args()
+
+    if args.dataset is not None and args.base_path is None:
+        parser.error("--base_path is required when using --dataset")
+    if args.file_path is not None and (args.dataset is not None or args.base_path is not None):
+        parser.error("--file_path should not be specified when using --dataset or --base_path")
 
     if args.dataset in ["allen", "liverperturb"]:
         args.normalize_total = False
     else:
         args.normalize_total = True
 
-    # Validate arguments
-    if args.dataset and not args.base_path:
-        parser.error("--base_path is required when using --dataset")
-    if args.anndata and args.base_path:
-        parser.error("--base_path should not be specified when using --anndata")
-
-    # Determine dataset name
-    if args.dataset:
-        dataset_name = args.dataset
-    elif args.anndata:
-        dataset_name = args.exp_name if args.exp_name else "unknown"
-    else:
-        dataset_name = "unknown"
-    
     # Create save directory structure
-    exp_dir_name = f"{dataset_name}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
+    exp_dir_name = f"{args.dataset}_expression_{args.k_hop}hop_{args.augment_hop}augment_{args.node_feature}_{args.inject_feature}"
     if args.debug:
         exp_dir_name = f"DEBUG_{exp_dir_name}"
 
@@ -552,15 +527,12 @@ def main():
         dataset=args.dataset,
         base_path=args.base_path,
         exp_name=args.exp_name,
-        adata_path=args.anndata,
+        file_path=args.file_path,
         gene_list=args.gene_list,
         normalize_total=args.normalize_total,
         debug=args.debug,
         debug_subset_size=args.debug_subset_size,
         device=args.device,
-        test_size=args.test_size,
-        random_state=args.random_state,
-        stratify_by=args.stratify_by,
         genept_embeddings=args.genept_embeddings,
         model_save_dir=model_save_dir,
         genept_strategy=args.genept_strategy, 

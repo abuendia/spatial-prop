@@ -22,6 +22,7 @@ from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_ce
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
 from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
+from spatial_gnn.utils.plot_utils import plot_loss_curves
 
 
 def main():
@@ -169,26 +170,8 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
 
     ### LOSS CURVES
     print("Plotting training and validation loss curves...", flush=True)
+    plot_loss_curves(save_dir)
     
-    with open(os.path.join(save_dir, "training.pkl"), 'rb') as handle:
-        b = pickle.load(handle)
-    
-    best_idx = np.argmin(b['test'])
-    
-    plt.figure(figsize=(4,4))
-    plt.plot(b['epoch'],b['train'],label='Train',color='0.2',zorder=0)
-    plt.plot(b['epoch'],b['test'],label='Test',color='green',zorder=1)
-    plt.scatter(b['epoch'][best_idx],b['test'][best_idx],s=50,c='green',marker="D",zorder=2,label="Selected Model")
-    plt.ylabel("Weighted L1 Loss", fontsize=16)
-    plt.xlabel("Training Epochs", fontsize=16)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, "loss_curves.pdf"), bbox_inches='tight')
-    plt.close()
-    
-    print("Finished plots.", flush=True)
-
     ### MODEL PERFORMANCE
     print("Measuring model predictive performance bulk and by cell type...", flush=True)
 
@@ -298,13 +281,6 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
     df_cell = pd.DataFrame(np.vstack((cell_r, cell_s, cell_r2, cell_mae, cell_rmse)).T,
                            columns=["Pearson","Spearman","R2","MAE", "RMSE"])
     df_cell.to_csv(os.path.join(save_dir, "test_evaluation_stats_cell.csv"), index=False)
-
-    # Print bulk results
-    print("Finished bulk analysis:", flush=True)
-    print("Cell:", flush=True)
-    print(df_cell.median(axis=0), flush=True)
-    print("Gene:", flush=True)
-    print(df_gene.median(axis=0), flush=True)
     
     # Calculate micro and macro averages
     print("Computing micro and macro averages...", flush=True)

@@ -4,7 +4,6 @@ import scanpy as sc
 import anndata as ad
 import os
 from scipy.sparse import issparse
-import pickle
 import random
 import multiprocessing as mp
 from pathlib import Path
@@ -71,6 +70,7 @@ class SpatialAgingCellDataset(Dataset):
                  sub_id="mouse_id",
                  use_ids=None,
                  center_celltypes='all', 
+                 whole_tissue=False,
                  num_cells_per_ct_id=1,
                  k_hop=2,
                  augment_hop=0,
@@ -84,6 +84,7 @@ class SpatialAgingCellDataset(Dataset):
                  overwrite=False,
                  debug=False,
                  use_mp=False,
+                 use_perturbed_expression=False,
                 ):
         self.root=root
         self.dataset_prefix=dataset_prefix
@@ -115,7 +116,9 @@ class SpatialAgingCellDataset(Dataset):
         self.debug=debug
         self.overwrite=overwrite
         self.use_mp=use_mp
-
+        self.use_perturbed_expression=use_perturbed_expression
+        self.whole_tissue=whole_tissue
+        
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
                 self.cell_embeddings = json.load(f)
@@ -131,7 +134,7 @@ class SpatialAgingCellDataset(Dataset):
                 print(f"Creating new dataset at {self.processed_dir}")
         
         if self.center_celltypes == "infer":
-            self.center_celltypes = infer_center_celltypes_from_adata(self.raw_filepaths[0])
+            self.center_celltypes = infer_center_celltypes_from_adata(self.raw_filepaths[0], top_n=3)
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
@@ -144,7 +147,14 @@ class SpatialAgingCellDataset(Dataset):
             aug_key = int(self.augment_cutoff*100)
         celltype_firstletters = "".join([x[0] for x in self.center_celltypes])
                 
-        data_dir = f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
+        data_dir = (
+            f"{self.dataset_prefix}_{self.target}_{self.num_cells_per_ct_id}per_"
+            f"{self.k_hop}hop_{self.augment_hop}C{aug_key}aug_{self.radius_cutoff}"
+            f"delaunay_{self.node_feature}Feat_{celltype_firstletters}_{self.inject_feature}Inject"
+        )
+        if self.use_perturbed_expression:
+            data_dir += f"_perturbed"
+
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)
         else:
@@ -301,94 +311,7 @@ class SpatialAgingCellDataset(Dataset):
                 
         print(f"Total subgraphs created: {subgraph_count}")
 
-    def _process_single_sample(self, args):
-        """
-        Process a single sample ID.
-        
-        Parameters
-        ----------
-        args : tuple
-            (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
-            
-        Returns
-        -------
-        tuple
-            (subgraph_data_list, augment_data_list, subgraph_count, augment_count)
-        """
-        sid, sid_idx, adata, gene_names, rfi, raw_filepath = args
-        
-        print(f"    Sample {sid_idx+1}: {sid} (PID: {os.getpid()})")
-        
-        # subset to each sample
-        sub_adata = adata[(adata.obs[self.sub_id]==sid)]
-        
-        # Delaunay triangulation with pruning of > 200um distances
-        build_spatial_graph(sub_adata, method="delaunay")
-        sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
-        sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
-        
-        edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
-        
-        ### Construct Node Labels
-        if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
-            raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
-                
-        if "celltype" in self.node_feature:
-            # get cell type one hot encoding
-            node_labels = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
-            node_labels = one_hot(node_labels, num_classes=len(self.celltypes_to_index.keys()))
-
-        # Check if perturbation mask exists and use it for expression features
-        use_perturbation_expression = self.perturbation_mask_key in sub_adata.obsm.keys()
-        if use_perturbation_expression:
-            print(f"Using perturbation expression in {self.perturbation_mask_key} key")
-        
-        if "expression" in self.node_feature:
-            # get spatial expression - use perturbation mask if available
-            if use_perturbation_expression:
-                # Use perturbation mask values instead of original expression
-                node_labels = sub_adata.obsm[self.perturbation_mask_key]
-                
-                # Reshape to match gene dimensions if needed
-                if len(node_labels.shape) == 1:
-                    # Single value per cell, expand to match gene dimensions
-                    node_labels = np.tile(node_labels[:, np.newaxis], (1, sub_adata.shape[1]))
-                
-                node_labels = torch.tensor(node_labels).float()
-            else:
-                # Use original expression values
-                if self.node_feature == "expression":
-                    node_labels = torch.tensor(sub_adata.X).float()
-                else:
-                    node_labels = torch.cat((node_labels, torch.tensor(sub_adata.X).float()), 1).float()
-                
-        if self.node_feature == "gaussian":
-            # random gaussian noise as features
-            node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
-        
-        if "X_spatial" in sub_adata.obsm:
-            precomputed_embed = torch.tensor(sub_adata.obsm["X_spatial"]).float()
-            node_labels = torch.cat((node_labels, precomputed_embed), dim=1)
-                
-        ### Get Indices of Random Center Cells
-        cell_idxs = []
-        
-        if self.center_celltypes == "all":
-            center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
-        else:
-            center_celltypes_to_use = self.center_celltypes
-            
-        for ct in center_celltypes_to_use:
-            np.random.seed(444)
-            idxs = np.random.choice(np.arange(sub_adata.shape[0])[sub_adata.obs["celltype"]==ct],
-                                    np.min([self.num_cells_per_ct_id, np.sum(sub_adata.obs["celltype"]==ct)]),
-                                    replace=False)
-            cell_idxs = np.concatenate((cell_idxs, idxs))
-        
-        print(f"      Selected {len(cell_idxs)} center cells")
-        
-        ### Extract K-hop Subgraphs
-        
+    def extract_khop_subgraphs(self, node_labels, edge_index, sub_adata, raw_filepath, cell_idxs):
         graph_labels = [] # for computing quantiles later
         subgraph_data_list = []
         
@@ -441,7 +364,7 @@ class SpatialAgingCellDataset(Dataset):
                 
                 subgraph_data_list.append(subgraph_data)
         
-        print(f"      Created {len(subgraph_data_list)} subgraphs")
+        print(f"Created {len(subgraph_data_list)} subgraphs")
         
         ### Selective Graph Augmentation
         augment_data_list = []
@@ -472,7 +395,6 @@ class SpatialAgingCellDataset(Dataset):
             
             
             # get subgraphs and save for augmentation
-            
             for cidx in augment_idxs:               
                 # get subgraph
                 cidx = int(cidx)
@@ -528,9 +450,112 @@ class SpatialAgingCellDataset(Dataset):
                     augment_data_list.append(subgraph_data)
                     augment_count += 1
             
-            print(f"      Created {augment_count} augmented subgraphs")
-        
+            print(f"Created {augment_count} augmented subgraphs")
+
         return subgraph_data_list, augment_data_list, len(subgraph_data_list), len(augment_data_list)
+
+    def _process_single_sample(self, args):
+        """
+        Process a single sample ID.
+        
+        Parameters
+        ----------
+        args : tuple
+            (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
+            
+        Returns
+        -------
+        tuple
+            (subgraph_data_list, augment_data_list, subgraph_count, augment_count)
+        """
+        sid, sid_idx, adata, gene_names, rfi, raw_filepath = args
+        
+        print(f"Sample {sid_idx+1}: {sid} (PID: {os.getpid()})")
+        
+        # subset to each sample
+        sub_adata = adata[(adata.obs[self.sub_id]==sid)]
+        
+        # Delaunay triangulation with pruning of > 200um distances
+        build_spatial_graph(sub_adata, method="delaunay")
+        sub_adata.obsp['spatial_connectivities'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
+        sub_adata.obsp['spatial_distances'][sub_adata.obsp['spatial_distances']>self.radius_cutoff] = 0
+        
+        edge_index, edge_att = from_scipy_sparse_matrix(sub_adata.obsp['spatial_connectivities'])
+        
+        ### Construct node labels
+        if self.node_feature not in ["celltype", "expression", "celltype_expression", "gaussian"]:
+            raise Exception (f"'node_feature' value of {self.node_feature} not recognized")
+
+        ct_one_hot = None
+        if "celltype" in self.node_feature:
+            ct_idx = torch.tensor([self.celltypes_to_index[x] for x in sub_adata.obs["celltype"]])
+            ct_one_hot = one_hot(ct_idx, num_classes=len(self.celltypes_to_index.keys()))
+                
+        expr_orig = None
+        expr_pert = None
+        has_perturbation = self.perturbation_mask_key in sub_adata.obsm.keys()
+        if "expression" in self.node_feature:
+            expr_orig = torch.tensor(sub_adata.X).float()
+
+            if has_perturbation:
+                pert = sub_adata.obsm[self.perturbation_mask_key]
+                if pert.ndim == 1:
+                    pert = np.tile(pert[:, np.newaxis], (1, sub_adata.shape[1]))
+                expr_pert = torch.tensor(pert).float()
+
+        node_labels = None
+        perturbed_node_labels = None 
+
+        if self.node_feature == "celltype":
+            node_labels = ct_one_hot
+            if has_perturbation:
+                perturbed_node_labels = ct_one_hot.clone()
+        elif self.node_feature == "expression":
+            node_labels = expr_orig 
+            if has_perturbation:
+                perturbed_node_labels = expr_pert
+        elif self.node_feature == "celltype_expression":
+            node_labels = torch.cat((ct_one_hot, expr_orig), 1)
+            if has_perturbation:
+                perturbed_node_labels = torch.cat((ct_one_hot, expr_pert), 1)
+        elif self.node_feature == "gaussian":
+            node_labels = torch.normal(mean=0, std=1, size=sub_adata.X.shape).float()
+            if has_perturbation:
+                perturbed_node_labels = node_labels.clone()
+        else:
+            raise Exception(f"Node feature {self.node_feature} not recognized")
+
+        ### Get Indices of Random Center Cells
+        cell_idxs = []
+        if self.center_celltypes == "all":
+            center_celltypes_to_use = np.unique(sub_adata.obs["celltype"])
+        else:
+            center_celltypes_to_use = self.center_celltypes
+            
+        if self.whole_tissue or self.num_cells_per_ct_id is None:
+            cell_idxs = np.arange(sub_adata.shape[0])
+        else:
+            for ct in center_celltypes_to_use:
+                np.random.seed(444)
+                idxs = np.random.choice(np.arange(sub_adata.shape[0])[sub_adata.obs["celltype"]==ct],
+                                        np.min([self.num_cells_per_ct_id, np.sum(sub_adata.obs["celltype"]==ct)]),
+                                        replace=False)
+                cell_idxs = np.concatenate((cell_idxs, idxs))
+        
+        print(f"Selected {len(cell_idxs)} center cells from {sub_adata.shape[0]} total cells")
+        
+        ### Extract K-hop Subgraphs
+        if self.use_perturbed_expression:
+            if perturbed_node_labels is None:
+                raise ValueError(
+                    f"use_perturbed_expression=True but '{self.perturbation_mask_key}' "
+                    f"was not found or is incompatible in sub_adata.obsm"
+                )
+            labels_to_use = perturbed_node_labels
+        else:
+            labels_to_use = node_labels
+        subgraph_data_list, augment_data_list, subgraph_count, augment_count = self.extract_khop_subgraphs(labels_to_use, edge_index, sub_adata, raw_filepath, cell_idxs)
+        return subgraph_data_list, augment_data_list, subgraph_count, augment_count
 
     def subgraph_from_index(self, cidx, edge_index, node_labels, sub_adata):
         '''

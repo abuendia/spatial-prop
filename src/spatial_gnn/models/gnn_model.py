@@ -955,7 +955,7 @@ def test(
     else:
         return np.mean(errors), spearman, 0.0
 
-def predict(model, dataloader, adata, gene_names=None, device="cuda"):
+def predict(model, dataloader, adata, gene_names=None, use_ids=None, device="cuda"):
     """
     Run GNN model predictions and convert back to AnnData format using the stored mapping info.
     
@@ -976,14 +976,12 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
         Updated AnnData with predictions in .X
     """    
     model.eval()
-    
     # Create prediction matrix with same shape as original
     n_cells, n_genes = adata.shape
     prediction_matrix = np.zeros((n_cells, n_genes), dtype=np.float32)
     
     # Track which cells have been predicted
     predicted_cells = set()
-    
     batch_count = 0    
     print(f"Starting prediction for {n_cells} cells, {n_genes} genes")
     
@@ -991,15 +989,7 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
         for batch in tqdm(dataloader, desc="Processing data groups"):
             batch.to(device)
             batch_count += 1
-            
-            # Compute baseline if predicting residuals
-            if model.predict_residuals:
-                k_hop_baseline = khop_mean_baseline_batch(
-                    x=batch.x,
-                    batch=batch.batch,
-                    center_nodes=batch.center_node,
-                )
-            
+                        
             # Prepare arguments for forward pass
             forward_args = {
                 'x': batch.x,
@@ -1016,11 +1006,6 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
                 out, _ = forward_output  # Unpack tuple, use expression output for prediction
             else:
                 out = forward_output
-            
-            # If predicting residuals, add baseline back to get final expression prediction
-            if model.predict_residuals:
-                out = out + k_hop_baseline
-            
             batch_predictions = out.detach().cpu().numpy()
             
             for i, pred in enumerate(batch_predictions):
@@ -1032,6 +1017,7 @@ def predict(model, dataloader, adata, gene_names=None, device="cuda"):
                 else:
                     raise ValueError(f"Prediction dimension {len(pred)} doesn't match genes {n_genes}")
                 predicted_cells.add(original_cell_idx)
-        
+    
+    print(f"Predicted {len(predicted_cells)} cells out of {n_cells}")
     adata.layers['predicted_perturbed'] = prediction_matrix
     return adata

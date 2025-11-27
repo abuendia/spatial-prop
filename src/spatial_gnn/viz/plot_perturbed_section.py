@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.rcParams['pdf.fonttype'] = 42
 matplotlib.rcParams['ps.fonttype'] = 42
 # %%
-perturbed_result = sc.read_h5ad("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/aging_coronal_pred_on_perturbed.h5ad")
+perturbed_result = sc.read_h5ad("/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/perturbed_adata_result_debug.h5ad")
 sc.pp.normalize_total(perturbed_result, target_sum=perturbed_result.shape[1])
 
 # %%
@@ -67,7 +67,7 @@ axes[0].set_title(f"{gene.upper()} original expression", fontsize=18)
 sc2 = axes[1].scatter(
     coordinates[:, 0], coordinates[:, 1],
     c=pert_log,
-    cmap="afmhot",
+    cmap="magma",
     s=1.75,
     vmin=vmin, vmax=1
 )

@@ -12,12 +12,12 @@ from typing import List, Dict, Union, Optional, Tuple, Any
 import os
 import tqdm 
 
-from spatial_gnn.scripts.train_gnn_with_celltype import train_model_from_scratch
+from spatial_gnn.scripts.train_gnn import train_model_from_scratch
 from spatial_gnn.utils.dataset_utils import load_model_from_path
 from spatial_gnn.models.gnn_model import predict
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_config
-from spatial_gnn.scripts.model_performance import eval_model
+from spatial_gnn.scripts.eval_gnn_expression import eval_model
 
 
 def train_perturbation_model(
@@ -32,8 +32,10 @@ def train_perturbation_model(
     inject_feature: Optional[str] = None,
     dataset: Optional[str] = None,
     base_path: Optional[str] = None,
+    file_path: Optional[str] = None,
+    train_ids: Optional[List[str]] = None,
+    test_ids: Optional[List[str]] = None,
     exp_name: Optional[str] = None,
-    adata_path: Optional[str] = None,
     gene_list: Optional[List[str]] = None,
     normalize_total: bool = True,
     predict_celltype: bool = False,
@@ -88,13 +90,16 @@ def train_perturbation_model(
     model_dir_name = loss + f"_{learning_rate:.0e}".replace("-", "n")
     model_save_dir = os.path.join(f"output/{exp_name}", exp_dir_name, model_dir_name)
     os.makedirs(model_save_dir, exist_ok=True)
-    print(f"Model will be saved to: {model_save_dir}")
+    print(f"Model will be saved to: ./{model_save_dir}")
 
     test_loader, gene_names, (model, model_config, trained_model_path) = train_model_from_scratch(
         dataset=dataset,
         base_path=base_path,
         model_save_dir=model_save_dir,
         exp_name=exp_name,
+        file_path=file_path,
+        train_ids=train_ids,
+        test_ids=test_ids,
         k_hop=k_hop,
         augment_hop=augment_hop,
         center_celltypes=center_celltypes,
@@ -104,7 +109,6 @@ def train_perturbation_model(
         loss=loss,
         epochs=epochs,
         num_cells_per_ct_id=num_cells_per_ct_id,
-        adata_path=adata_path,
         gene_list=gene_list,
         normalize_total=normalize_total,
         predict_celltype=predict_celltype,
@@ -116,7 +120,7 @@ def train_perturbation_model(
         eval_model(
             model=model,
             test_loader=test_loader,
-            save_dir=trained_model_path,
+            save_dir=model_save_dir,
             device=device,
             inject=False,
             gene_names=gene_names,
@@ -185,6 +189,8 @@ def predict_perturbation_effects(
     model_path: str,
     exp_name: str,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    use_ids: Optional[List[str]] = None,
+    whole_tissue: bool = True,
     **kwargs
 ) -> ad.AnnData:
     """
@@ -229,7 +235,12 @@ def predict_perturbation_effects(
     dataset = "aging_coronal"
     base_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw"
     _, file_path, _, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
-    
+
+    if use_ids is None:
+        use_ids = test_ids
+    # save unpreturbed graphs
+    # save keys for intermediate GNN prediction 
+
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
     test_dataset = SpatialAgingCellDataset(
@@ -242,12 +253,12 @@ def predict_perturbation_effects(
         inject_feature=None,
         num_cells_per_ct_id=100,
         center_celltypes="all",
-        use_ids=test_ids,
+        whole_tissue=whole_tissue,
+        use_ids=use_ids,
         raw_filepaths=[adata_path],
         gene_list=None,
         celltypes_to_index=celltypes_to_index,
         normalize_total=True,
-        debug=True,
         overwrite=False,
         use_mp=False,
     )
@@ -259,7 +270,11 @@ def predict_perturbation_effects(
         all_test_data.extend(batch_list)
     test_loader = DataLoader(all_test_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
-    adata_result = predict(model, test_loader, test_adata, device)
+    # subset to mouse ids in use_ids
+    test_adata = test_adata[test_adata.obs["mouse_id"].isin(use_ids)]
+    breakpoint()
+    adata_result = predict(model, test_loader, test_adata, device=device)
+    adata_result = temper( adata_result, method="distribution_renormalize")
     print("Perturbation prediction completed successfully!")
     return adata_result
 
@@ -299,3 +314,22 @@ def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
     
     return summary_df
 
+if __name__ == "__main__":
+    adata_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
+    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/aging_coronal_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/aging_coronal_perturbed.h5ad"
+    exp_name = "aging_coronal_perturbed_debug"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_ids = ["11"]
+
+    perturbation_dict = {
+        'T cell': {'Igf2': 10.0},  
+        'NSC': {'Sox9': 10.0},         
+        'Pericyte': {'Ccl4': 10.5}   
+    }
+    adata = sc.read_h5ad(adata_path)
+    save_path = create_perturbation_input_matrix(adata, perturbation_dict, save_path=save_path)
+    adata_result = predict_perturbation_effects(
+        save_path, model_path, exp_name, device, use_ids=use_ids
+    )
+    adata_result.write(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/perturbed_adata_result_debug.h5ad")

@@ -133,7 +133,7 @@ def main():
     
     train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
     test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    save_dir = os.path.join("results", "go_causal_interaction_update", args.exp_name, model_type)
+    save_dir = os.path.join("results", "go_causal_interaction_final", args.exp_name, model_type)
 
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {save_dir}", flush=True)
@@ -209,7 +209,7 @@ def go_causal_interaction(
         response_indices = np.where(np.isin(gene_names, response_genes_overlap))[0]
         
         # run perturbations
-        props = np.linspace(0,1,round((num_props+1)/2))
+        props = np.linspace(0,1,round(num_props))
         #oneside_props = np.linspace(0,1,round((num_props+1)/2))
         #props = np.unique(np.concatenate((-oneside_props,oneside_props)))
         

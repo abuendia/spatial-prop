@@ -1,12 +1,9 @@
 import os
 import json
-from typing import Union, List, Optional, Tuple
-import numpy as np
+from typing import Union, List, Optional
 import scanpy as sc
-
 import torch
-from sklearn.model_selection import train_test_split
-import anndata as ad
+
 from spatial_gnn.models.gnn_model import GNN
 
 
@@ -48,7 +45,7 @@ def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Uni
     return center_celltypes
 
 
-def infer_center_celltypes_from_adata(adata_path):
+def infer_center_celltypes_from_adata(adata_path, top_n: int = 3):
     """
     Infer center cell types by finding the 3 cell types with the lowest cell counts.
 
@@ -66,11 +63,11 @@ def infer_center_celltypes_from_adata(adata_path):
     adata = sc.read_h5ad(adata_path)
     celltype_counts = adata.obs['celltype'].value_counts()
 
-    if len(celltype_counts) <= 3:
+    if len(celltype_counts) <= top_n:
         inferred_celltypes = celltype_counts.index.tolist()
         print(f"Inferred center cell types (all {len(inferred_celltypes)} available): {inferred_celltypes}")
     else:
-        # Get the 3 with lowest counts
+        # Get the n with lowest counts
         inferred_celltypes = celltype_counts.nsmallest(3).index.tolist()
         print(f"Inferred center cell types (3 lowest counts): {inferred_celltypes}")
         print(f"Cell type counts: {celltype_counts[inferred_celltypes].to_dict()}")
@@ -200,107 +197,3 @@ def load_model_from_path(model_path: str, device: str) -> torch.nn.Module:
     model.eval()
     
     return model, config
-
-
-def split_anndata_train_test(
-    adata: 'ad.AnnData',
-    test_size: float = 0.2,
-    random_state: int = 42,
-    stratify_by: Optional[str] = None
-) -> Tuple[List[str], List[str]]:
-    """
-    Split an AnnData object into train and test sets based on mouse_id.
-    
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        Input AnnData object to split
-    test_size : float, default=0.2
-        Proportion of data to use for testing
-    random_state : int, default=42
-        Random seed for reproducibility
-    stratify_by : Optional[str], default=None
-        Column name in adata.obs to stratify the split by (e.g., 'celltype')
-        
-    Returns
-    -------
-    Tuple[List[str], List[str]]
-        - List of training cell IDs
-        - List of testing cell IDs
-    """
-
-    # Get unique mouse IDs
-    unique_mouse_ids = adata.obs["mouse_id"].unique()
-    
-    if stratify_by is not None:
-        # For stratification, we need to get the most common value per mouse
-        # Group by mouse_id and get the most frequent value for stratify_by
-        mouse_stratify_values = []
-        for mouse_id in unique_mouse_ids:
-            mouse_mask = adata.obs["mouse_id"] == mouse_id
-            mouse_stratify = adata.obs.loc[mouse_mask, stratify_by].mode()
-            if len(mouse_stratify) > 0:
-                mouse_stratify_values.append(mouse_stratify.iloc[0])
-            else:
-                mouse_stratify_values.append(None)
-        stratify_labels = mouse_stratify_values
-    else:
-        stratify_labels = None
-    
-    # Split unique mouse IDs
-    train_mouse_ids, test_mouse_ids = train_test_split(
-        unique_mouse_ids,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify_labels
-    )
-
-    return train_mouse_ids, test_mouse_ids
-
-
-def _combine_expression_with_genept(expression_matrix, gene_names, genept_embeddings):
-    """
-    Combine raw expression values with GenePT embeddings.
-    
-    For each gene, multiply the raw expression value by the corresponding GenePT embedding.
-    This creates a feature vector that combines expression magnitude with semantic gene information.
-    
-    Parameters:
-    -----------
-    expression_matrix : np.ndarray
-        Expression matrix (cells x genes)
-    gene_names : np.ndarray
-        Gene names corresponding to the expression matrix
-    genept_embeddings : dict
-        Dictionary mapping gene names to their GenePT embeddings
-        
-    Returns:
-    --------
-    np.ndarray
-        Combined features matrix (cells x (genes * embedding_dim))
-    """
-    if genept_embeddings is None:
-        return expression_matrix
-    
-    # Get embedding dimension
-    emb_dim = len(next(iter(genept_embeddings.values())))
-    
-    # Initialize output matrix
-    n_cells, n_genes = expression_matrix.shape
-    combined_features = np.zeros((n_cells, n_genes * emb_dim), dtype=np.float32)
-    
-    # For each gene, combine expression with embedding
-    for i, gene_name in enumerate(gene_names):
-        if gene_name in genept_embeddings:
-            # Get the GenePT embedding for this gene
-            gene_embedding = genept_embeddings[gene_name]
-            
-            # Multiply expression values by the embedding
-            # This creates a feature vector where each element is expression * embedding_dim
-            for j in range(emb_dim):
-                combined_features[:, i * emb_dim + j] = expression_matrix[:, i] * gene_embedding[j]
-        else:
-            # If gene not in embeddings, use zeros for that gene's embedding dimensions
-            combined_features[:, i * emb_dim:(i + 1) * emb_dim] = 0.0
-    
-    return combined_features

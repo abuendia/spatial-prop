@@ -151,21 +151,20 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renorm
         # get perturbation mask based on cutoffs (same gene)
         pred_perturb_delta = true_expn - pred_perturb_expn
         perturb_mask = torch.logical_or((percentile_cutoff_top < pred_perturb_delta), (percentile_cutoff_bottom > pred_perturb_delta))
-        
+        perturb_diff = errors - pred_perturb_delta
+
         # further mask so that perturbation must be greater magnitude than prediction error (same gene, same cell)
-        perturb_mask = torch.logical_and(perturb_mask, torch.abs(pred_perturb_delta) > torch.abs(errors))
-        
-        # further mask to remove negative values
-        perturb_mask = torch.logical_and(perturb_mask, pred_perturb_expn >= 0)
+        perturb_mask = torch.logical_and(perturb_mask, torch.abs(perturb_diff) > 1e-4)
         
         # mask perturbations
         true_perturb_expn = true_expn.clone()
         true_perturb_expn[perturb_mask] = pred_perturb_expn[perturb_mask]
-        
+    
+        # further mask to remove negative values
+        true_perturb_expn[true_perturb_expn < 0] = 0
         # compute renormalization
         true_perturb_expn = renorm_expression(true_expn, true_perturb_expn)
-        
-        
+
     elif method == "renormalize":
         
         # further mask to remove negative values
@@ -192,7 +191,7 @@ def perturb_data (data, perturbation, mask=None, method="add"):
         mask - boolean array for which cells to perturb (of length data.x.shape[0])
         method - str specifying how to perturb ("add", "multiply"); default is "add"
     '''
-    data_perturbed = data
+    data_perturbed = data.clone()
     if mask is None:
         if method == "add":
             data_perturbed.x = data.x + perturbation
@@ -336,6 +335,7 @@ def perturb_by_multiplier(data, gene_indices, perturb_celltype=None, prop=1.0, d
         graph_mask = (data.celltypes == perturb_celltype)
         node_mask = graph_mask[data.batch]
         mask = node_mask
-        
-    data = perturb_data(data, perturb_vec, mask=mask, method="multiply")
-    return (data)
+    
+    data_copy = data.clone()
+    data_perturbed = perturb_data(data_copy, perturb_vec, mask=mask, method="multiply")
+    return (data_perturbed)

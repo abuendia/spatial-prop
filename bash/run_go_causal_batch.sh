@@ -2,14 +2,14 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0 1 2)   # GPUs to use
-JOBS_PER_GPU=1 # how many concurrent jobs per GPU
+GPUS=(0 1 2 3)   # GPUs to use
+JOBS_PER_GPU=3 # how many concurrent jobs per GPU
 
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PAIRS_PATH=/oak/stanford/groups/akundaje/abuen/spatial/CausalInteractionBench/pairs
-PY=$BASE/src/spatial_gnn/scripts/go_causal_interaction.py
-DATASETS=("reprogramming")
-MODEL_TYPE=("model" "global_mean" "khop_mean")
+PY=$BASE/src/spatial_gnn/scripts/run_go_causal_eval.py
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
+MODEL_TYPE=("global_mean" "khop_mean")
 
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
@@ -35,7 +35,7 @@ for dataset in "${DATASETS[@]}"; do
 
     {
       ts=$(date +%Y%m%d_%H%M%S)
-      log="$LOGDIR/go_itxn_${dataset}_${model_type}_${ts}.log"
+      log="$LOGDIR/go_causal_eval_${dataset}_${model_type}_${ts}.log"
       echo "[$(date +%T)] start $dataset ($model_type) on GPU $gpu -> $log"
 
       # Run and capture both stdout and stderr to the log file
