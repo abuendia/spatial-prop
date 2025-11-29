@@ -168,13 +168,7 @@ def main():
 
 def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_names=None):
 
-    ### LOSS CURVES
-    print("Plotting training and validation loss curves...", flush=True)
-    plot_loss_curves(save_dir)
-    
-    ### MODEL PERFORMANCE
     print("Measuring model predictive performance bulk and by cell type...", flush=True)
-
     model.eval()
     preds = []
     actuals = []

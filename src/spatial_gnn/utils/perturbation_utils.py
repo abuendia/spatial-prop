@@ -13,23 +13,7 @@ from torch_geometric.loader import DataLoader
 from torch_geometric.utils import k_hop_subgraph, one_hot, to_networkx
 
 
-def generate_from_anndata ():
-    '''
-    Generates all predictions for AnnData object:
-        loader - DataLoader object
-        model - torch_geometric model object
-        perturbation [str] - key in adata.obsm containing perturbed expression
-        inject [bool] - whether model requires center cell type
-    
-    Output is adata with "predicted" and "predicted_perturbed" in adata.obsm
-        If perturbation is "batch_steer", will also add "target"
-    '''
-    # Create a dataloader that creates batches of graphs from the adata object
-    
-    return ()
-
-
-def propagate_perturbation (adata, method='distribution', temper=0.05):
+def propagate_perturbation(adata, method='distribution', temper=0.05):
     '''
     Given outputs from generate_from_anndata computes the perturbed gene expression for each cell:
         adata [AnnData] - output from generate_from_dataloader() or generate_from_anndata()
@@ -45,7 +29,7 @@ def propagate_perturbation (adata, method='distribution', temper=0.05):
     pred_perturb_expn = adata.obsm["predicted_perturbed"]
     
     # temper and compute perturbed expression
-    true_perturb_expn = temper (true_expn, pred_expn, pred_perturb_expn, method=method, temper=temper)
+    true_perturb_expn = temper(true_expn, pred_expn, pred_perturb_expn, method=method, temper=temper)
     
     # add to adata
     adata.obsm["perturbed"] = true_perturb_expn
@@ -53,7 +37,7 @@ def propagate_perturbation (adata, method='distribution', temper=0.05):
     return (adata)
 	
 	
-def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renormalize", temper=0.05):
+def temper(true_expn, pred_expn, pred_perturb_expn, method="distribution_renormalize", temper=0.05):
     '''
     Compute the perturbed gene expression given:
         true_expn - array (cell x gene) of true unperturbed expression
@@ -63,7 +47,7 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renorm
     Returns:
         true_perturb_expn - array (cell x gene) of perturbed expression
     '''
-    def renorm_expression (s, p_hat):
+    def renorm_expression(s, p_hat):
         row_norm = torch.sum(s, dim=1) / torch.sum(p_hat, dim=1)
         p = p_hat * row_norm.unsqueeze(1)
         return (p)
@@ -121,11 +105,11 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renorm
         perturb_mask = torch.logical_and(perturb_mask, torch.abs(pred_perturb_delta) > torch.abs(errors))
         
         # compute calibrated update to perturbation (i.e. right piecewise performs calibrated rescaling)
-        def get_p (s, p_hat):
+        def get_p(s, p_hat):
             L = get_L(s, p_hat)
             p = (1-L)*s+L*p_hat
             return(p)
-        def get_L (s, p_hat):
+        def get_L(s, p_hat):
             L = 1/(1+torch.log(torch.abs(s-p_hat)+1)) # logarithm decay of L from 1 to 0
             return (L)
         #calibrated_perturb_expn = true_expn + ((pred_perturb_expn - pred_expn) * ((1+true_expn)/(1+pred_expn)))
@@ -183,7 +167,7 @@ def temper (true_expn, pred_expn, pred_perturb_expn, method="distribution_renorm
     return (true_perturb_expn)
 	
 
-def perturb_data (data, perturbation, mask=None, method="add"):
+def perturb_data(data, perturbation, mask=None, method="add"):
     '''
     Makes perturbation given a graph data object, perturbation, and cell mask
         data - torch_geometric input data object corresponding to subgraph for a cell
@@ -205,7 +189,7 @@ def perturb_data (data, perturbation, mask=None, method="add"):
     return (data_perturbed)
 	
     
-def predict (model, data, inject=False):
+def predict(model, data, inject=False):
     '''Get predicted expression
     '''
     if inject is False:
@@ -226,7 +210,7 @@ def get_center_celltypes(data):
 	
     
 ### STEERING MODULES
-def batch_steering_mean (data, actual, out, center_celltypes, target=None, prop=1.0):
+def batch_steering_mean(data, actual, out, center_celltypes, target=None, prop=1.0):
     '''
     Make perturbations by steering all graphs (of same cell type) to the mean
     cell type-specific expression of the first graph in the batch

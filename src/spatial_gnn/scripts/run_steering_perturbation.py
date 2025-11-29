@@ -9,9 +9,9 @@ import torch
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
-from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
+from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.utils.perturbation_utils import batch_steering_mean, batch_steering_cell
-from spatial_gnn.utils.dataset_utils import load_dataset_config
+from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
 from spatial_gnn.models.mean_baselines import (
@@ -51,7 +51,7 @@ def main():
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
     print(f"\n {args.dataset}", flush=True)
     
-    temper_methods = ["renormalize", "distribution_renormalize"]
+    temper_methods = ["renormalize"]
 
     # load parameters from arguments
     dataset_config = DATASET_CONFIGS[args.dataset]
@@ -123,21 +123,25 @@ def main():
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
 
-    all_train_data, all_test_data = [], []
-    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
-        all_train_data.extend(batch_list)
-    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
-    
-    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    save_dir = os.path.join("steer_within", test_dataset.processed_dir.split("/")[-2], args.exp_name, model_type)
+    _, train_loader = create_dataloader_from_dataset(
+        dataset=train_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
+    _, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
+    save_dir = os.path.join("results", "steer_within_final", test_dataset.processed_dir.split("/")[-2], args.exp_name, model_type)
 
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {save_dir}", flush=True)
@@ -158,7 +162,7 @@ def main():
     )
     print(f"Model initialized on {device}")
 
-    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
     model.load_state_dict(torch.load(model_save_dir), strict=False)
     model.to(device)
 

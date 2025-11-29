@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+import scipy.sparse as sp
 
 
 def plot_loss_curves(save_dir):
@@ -61,3 +62,40 @@ def plot_celltype_performance(save_dir):
     plt.show()
     plt.savefig(os.path.join(save_dir, "celltype_performance_nonzero_genes.pdf"), bbox_inches='tight')
     plt.close()
+
+
+def plot_gene_in_section(adata, gene, layer, title, save_dir):
+    coordinates = adata.obsm["spatial"]
+    g_idx = np.where(adata.var_names == gene)[0][0]
+
+    if sp.issparse(layer):
+        pert = layer[:, g_idx].toarray().ravel()
+    else:
+        pert = layer[:, g_idx]
+
+    expn_log = np.log1p(pert)
+    fig_pert, ax_pert = plt.subplots(figsize=(6, 5))
+
+    sc = ax_pert.scatter(
+        coordinates[:, 0], coordinates[:, 1],
+        c=expn_log,
+        cmap="afmhot",
+        s=2,
+        vmin=0, vmax=1,
+        rasterized=True
+    )
+    ax_pert.axis("off")
+    ax_pert.set_title(title, fontsize=14)
+
+    cbar_ax = fig_pert.add_axes([0.90, 0.15, 0.03, 0.7])
+    cbar = fig_pert.colorbar(sc, cax=cbar_ax)
+    cbar.set_label("Expression (log scale)", fontsize=10)
+    cbar.ax.tick_params(labelsize=10)
+
+    # save figure
+    title_fig = title.replace(" ", "_")
+    fig_pert.savefig(
+        f"{save_dir}/{gene}_{title_fig}.pdf",
+        bbox_inches="tight",
+        dpi=300
+    )

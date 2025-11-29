@@ -15,7 +15,7 @@ from torch_geometric.loader import DataLoader
 
 from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config
+from spatial_gnn.utils.dataset_utils import get_dataset_config, create_dataloader_from_dataset
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
 from spatial_gnn.utils.metric_utils import compute_celltype_accuracy
 from spatial_gnn.scripts.eval_gnn_expression import eval_model
@@ -184,25 +184,25 @@ def train_model_from_scratch(
             genept_embeddings_raw = pickle.load(f)
         # Convert all keys to uppercase
         genept_embeddings = {k.upper(): v for k, v in genept_embeddings_raw.items()}
-
-    # Load data
-    all_train_data = []
-    all_test_data = []
     
-    for idx, f in tqdm.tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
-        if debug and idx > debug_subset_size:
-            break
-        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)  # list[Data]
-        all_train_data.extend(batch_list)
-    
-    for idx, f in tqdm.tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
-        if debug and idx > debug_subset_size:
-            break
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
-    
-    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    all_train_data, train_loader = create_dataloader_from_dataset(
+        dataset=train_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=debug,
+    )
+    all_test_data, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=debug,
+    )
 
     print(f"Train samples: {len(all_train_data)}", flush=True)
     print(f"Test samples: {len(all_test_data)}", flush=True)

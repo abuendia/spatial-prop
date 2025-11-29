@@ -17,7 +17,7 @@ from torch_geometric.utils.convert import from_scipy_sparse_matrix
 import json
 
 from spatial_gnn.utils.graph_utils import build_spatial_graph
-from spatial_gnn.utils.dataset_utils import parse_center_celltypes, infer_center_celltypes_from_adata
+import spatial_gnn.utils.dataset_utils as dataset_utils
 
 
 class SpatialAgingCellDataset(Dataset):
@@ -100,7 +100,7 @@ class SpatialAgingCellDataset(Dataset):
         self.inject_feature=inject_feature
         self.sub_id=sub_id
         self.use_ids=use_ids
-        self.center_celltypes=parse_center_celltypes(center_celltypes)
+        self.center_celltypes=dataset_utils.parse_center_celltypes(center_celltypes)
         self.num_cells_per_ct_id=num_cells_per_ct_id
         self.k_hop=k_hop
         self.augment_hop=augment_hop
@@ -118,6 +118,11 @@ class SpatialAgingCellDataset(Dataset):
         self.use_mp=use_mp
         self.use_perturbed_expression=use_perturbed_expression
         self.whole_tissue=whole_tissue
+
+        self._subset_suffix = ""
+        if self.use_ids is not None:
+            flat_ids = sorted(self.use_ids)
+        self._subset_suffix = "_subset_" + "-".join(flat_ids)
         
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
@@ -134,7 +139,7 @@ class SpatialAgingCellDataset(Dataset):
                 print(f"Creating new dataset at {self.processed_dir}")
         
         if self.center_celltypes == "infer":
-            self.center_celltypes = infer_center_celltypes_from_adata(self.raw_filepaths[0], top_n=3)
+            self.center_celltypes = dataset_utils.infer_center_celltypes_from_adata(self.raw_filepaths[0], top_n=3)
 
     def indices(self):
         return range(self.len()) if self._indices is None else self._indices
@@ -154,6 +159,8 @@ class SpatialAgingCellDataset(Dataset):
         )
         if self.use_perturbed_expression:
             data_dir += f"_perturbed"
+
+        data_dir += self._subset_suffix
 
         if self.subfolder_name is not None:
             return os.path.join(self.root, self.processed_folder_name, data_dir, self.subfolder_name)

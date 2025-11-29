@@ -7,7 +7,7 @@ name = "spatial-gnn"
 version = "0.1.0"
 description = "GNN models for spatial transcriptomics"
 readme = "README.md"
-license = {file="LICENSE"}
+license = "MIT"
 authors = [{name = "Eric Sun", email = "edsun@stanford.edu"}, {name = "Alejandro Buendia", email = "abuen@stanford.edu"}]
 requires-python = ">=3.10,<4"
 dependencies = [

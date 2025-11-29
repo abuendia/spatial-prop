@@ -3,13 +3,13 @@ set -uo pipefail
 
 # ---- config ----
 GPUS=(0 1 2 3)   # GPUs to use
-JOBS_PER_GPU=3 # how many concurrent jobs per GPU
+JOBS_PER_GPU=2 # how many concurrent jobs per GPU
 
 BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
 PAIRS_PATH=/oak/stanford/groups/akundaje/abuen/spatial/CausalInteractionBench/pairs
 PY=$BASE/src/spatial_gnn/scripts/run_go_causal_eval.py
-DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
-MODEL_TYPE=("global_mean" "khop_mean")
+DATASETS=("aging_coronal" "zeng" "exercise" "reprogramming" "androvic" "farah" "aging_sagittal")
+MODEL_TYPE=("khop_mean")
 
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
@@ -63,5 +63,4 @@ for dataset in "${DATASETS[@]}"; do
 done
 
 wait
-exec 3>&- 3<&-
 echo "All datasets finished."

@@ -16,7 +16,7 @@ from spatial_gnn.scripts.train_gnn import train_model_from_scratch
 from spatial_gnn.utils.dataset_utils import load_model_from_path
 from spatial_gnn.models.gnn_model import predict
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config
+from spatial_gnn.utils.dataset_utils import get_dataset_config, create_dataloader_from_dataset
 from spatial_gnn.scripts.eval_gnn_expression import eval_model
 
 
@@ -178,6 +178,8 @@ def create_perturbation_input_matrix(
         perturbed_adata.obsm[mask_key] = perturbed
 
     if save_path is not None:
+        # ensure directory exists
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         perturbed_adata.write(save_path)
         print(f"Saved AnnData with perturbation input to: {save_path}")
 
@@ -238,8 +240,6 @@ def predict_perturbation_effects(
 
     if use_ids is None:
         use_ids = test_ids
-    # save unpreturbed graphs
-    # save keys for intermediate GNN prediction 
 
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
@@ -256,80 +256,57 @@ def predict_perturbation_effects(
         whole_tissue=whole_tissue,
         use_ids=use_ids,
         raw_filepaths=[adata_path],
-        gene_list=None,
         celltypes_to_index=celltypes_to_index,
         normalize_total=True,
-        overwrite=False,
-        use_mp=False,
     )
     test_dataset.process()
 
-    all_test_data = []
-    for idx, f in tqdm.tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
+    perturbed_test_dataset = SpatialAgingCellDataset(
+        subfolder_name="predict",
+        dataset_prefix=exp_name,
+        target="expression",
+        k_hop=2,
+        augment_hop=2,
+        node_feature="expression",
+        inject_feature=None,
+        num_cells_per_ct_id=100,
+        center_celltypes="all",
+        whole_tissue=True,
+        use_ids=use_ids,
+        raw_filepaths=[adata_path],
+        celltypes_to_index=celltypes_to_index,
+        normalize_total=True,
+        perturbation_mask_key="perturbed_input",
+        use_perturbed_expression=True,
+    )
+    perturbed_test_dataset.process()
 
-    # subset to mouse ids in use_ids
-    test_adata = test_adata[test_adata.obs["mouse_id"].isin(use_ids)]
-    breakpoint()
-    adata_result = predict(model, test_loader, test_adata, device=device)
-    adata_result = temper( adata_result, method="distribution_renormalize")
+    _, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+    _, perturbed_test_loader = create_dataloader_from_dataset(
+        dataset=perturbed_test_dataset,
+        batch_size=512,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+
+    # Get predictions for both unperturbed and perturbed data, and apply tempering
+    adata_result = predict(
+        model, 
+        test_adata, 
+        test_loader, 
+        perturbed_dataloader=perturbed_test_loader,
+        use_ids=use_ids,
+        temper_method="distribution_renormalize",
+        device=device
+    )
     print("Perturbation prediction completed successfully!")
     return adata_result
-
-
-def get_perturbation_summary(adata: ad.AnnData) -> pd.DataFrame:
-    """
-    Generate a summary of perturbation effects.
-    
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        AnnData object with perturbation results
-        
-    Returns
-    -------
-    pd.DataFrame
-        Summary statistics of perturbation effects
-    """
-    
-    if 'perturbation_effects' not in adata.layers:
-        raise ValueError("No perturbation effects found in adata.layers")
-    
-    effects = adata.layers['perturbation_effects']
-    
-    # Calculate summary statistics
-    summary_stats = {
-        'mean_effect': np.mean(effects, axis=0),
-        'std_effect': np.std(effects, axis=0),
-        'max_effect': np.max(effects, axis=0),
-        'min_effect': np.min(effects, axis=0),
-        'median_effect': np.median(effects, axis=0),
-        'num_perturbed_cells': np.sum(effects != 0)
-    }
-    
-    # Create DataFrame
-    summary_df = pd.DataFrame(summary_stats, index=adata.var_names)
-    
-    return summary_df
-
-if __name__ == "__main__":
-    adata_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
-    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/aging_coronal_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
-    save_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/aging_coronal_perturbed.h5ad"
-    exp_name = "aging_coronal_perturbed_debug"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_ids = ["11"]
-
-    perturbation_dict = {
-        'T cell': {'Igf2': 10.0},  
-        'NSC': {'Sox9': 10.0},         
-        'Pericyte': {'Ccl4': 10.5}   
-    }
-    adata = sc.read_h5ad(adata_path)
-    save_path = create_perturbation_input_matrix(adata, perturbation_dict, save_path=save_path)
-    adata_result = predict_perturbation_effects(
-        save_path, model_path, exp_name, device, use_ids=use_ids
-    )
-    adata_result.write(f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/perturbed_adata/perturbed_adata_result_debug.h5ad")

@@ -3,6 +3,8 @@ import json
 from typing import Union, List, Optional
 import scanpy as sc
 import torch
+from torch_geometric.data import DataLoader, Dataset
+from tqdm import tqdm
 
 from spatial_gnn.models.gnn_model import GNN
 
@@ -17,6 +19,34 @@ def load_dataset_config():
         raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
     except json.JSONDecodeError:
         raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
+
+
+def create_dataloader_from_dataset(
+    dataset: Dataset,
+    batch_size: int = 512,
+    shuffle: bool = False,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    persistent_workers: bool = True,
+    debug: bool = False,
+) -> DataLoader:
+    """Create a DataLoader from a SpatialAgingCellDataset."""
+    all_data = []
+    for idx, f in tqdm(enumerate(dataset.processed_file_names), total=len(dataset.processed_file_names)):
+        if debug and idx > 2:
+            break
+        batch_list = torch.load(os.path.join(dataset.processed_dir, f), weights_only=False)
+        all_data.extend(batch_list)
+    
+    dataloader = DataLoader(
+        all_data,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+    )
+    return all_data, dataloader
 
 
 def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Union[str, List[str], None]:

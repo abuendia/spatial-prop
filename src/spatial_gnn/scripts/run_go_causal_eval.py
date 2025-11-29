@@ -10,7 +10,7 @@ import scanpy as sc
 
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
-from spatial_gnn.utils.dataset_utils import load_dataset_config
+from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
 from spatial_gnn.utils.perturbation_utils import perturb_by_multiplier
@@ -119,20 +119,24 @@ def main():
     test_dataset.process()
     print("Finished processing test dataset", flush=True)
 
-    all_train_data, all_test_data = [], []
-    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
-        all_train_data.extend(batch_list)
-    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
-    
-    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
+    _, train_loader = create_dataloader_from_dataset(
+        dataset=train_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
+    _, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
     save_dir = os.path.join("results", "go_causal_interaction_final", args.exp_name, model_type)
 
     os.makedirs(save_dir, exist_ok=True)
@@ -161,6 +165,26 @@ def main():
     gene_names = np.char.upper(train_dataset.gene_names.astype(str))
     go_causal_interaction(model, train_loader, test_loader, save_dir, model_type, perturb_approach, num_props, pairs_path, gene_names, debug=args.debug, device=device)
 
+def is_complete(save_file_path):
+    required_cols = ["Prop", "Normalized Forward", "Normalized Reverse", "Celltype"]
+
+    if not os.path.exists(save_file_path):
+        return False
+
+    try:
+        df = pd.read_csv(save_file_path)
+    except Exception:
+        return False
+
+    if len(df) < 1:
+        return False
+
+    if required_cols is not None:
+        missing = [c for c in required_cols if c not in df.columns]
+        if len(missing) > 0:
+            return False
+    return True
+
 def go_causal_interaction(
     model,
     train_loader,
@@ -188,6 +212,13 @@ def go_causal_interaction(
         terms_list = terms_list[:2]
     
     for term in tqdm(terms_list, total=len(terms_list)):
+
+        save_file_path = os.path.join(save_dir,term,f"{savename}_results.csv")
+        # check that file is complete
+        if is_complete(save_file_path):
+            print(f"Skipping {term} because it is complete", flush=True)
+            continue
+
         # read in production and response gene lists (convert to uppercase for consistency)
         production_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"production_{term}.csv"), header=None).values.flatten().astype(str))
         response_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"response_{term}.csv"), header=None).values.flatten().astype(str))
