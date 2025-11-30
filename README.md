@@ -68,4 +68,4 @@ Then we can apply these perturbations and compute SpatialProp-predicted effects 
         use_ids=test_ids
     )
 
-This will return an updated anndata object with predicted propagated expression that can be accessed as `adata_perturbed.layers['tempered']`. Check out the [notebook example](./notebooks/api_demo.ipynb) for the entire end-to-end training and inference workflow, as well as plotting utilities used in the package.
+This will return an updated anndata object with predicted propagated expression that can be accessed as `adata_perturbed.layers['predicted_tempered']`. Check out the [notebook example](./notebooks/api_demo.ipynb) for the entire end-to-end training and inference workflow, as well as plotting utilities used in the package.
