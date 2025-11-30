@@ -1104,6 +1104,6 @@ def predict(
 
     adata.layers["predicted_unperturbed"] = unperturbed_prediction_matrix
     adata.layers["predicted_perturbed"] = perturbed_prediction_matrix
-    adata.layers["tempered"] = tempered_prediction_matrix
+    adata.layers["predicted_tempered"] = tempered_prediction_matrix
     print(f"Applied tempering with method '{temper_method}' (batch-wise)")
     return adata

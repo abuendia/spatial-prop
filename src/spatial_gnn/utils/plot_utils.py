@@ -31,7 +31,7 @@ def plot_celltype_performance(save_dir):
     with open(os.path.join(save_dir, "test_evaluation_stats_bycelltype_nonzero_genes.pkl"), 'rb') as handle:
         ct_stats_dict = pickle.load(handle)
 
-    columns_to_plot = ["Cell - Pearson (mean)", "Cell - Spearman (mean)", "Cell - R2 (mean)"]
+    columns_to_plot = ["Cell - Pearson (mean)", "Cell - Spearman (mean)"]
     metric_col = []
     ct_col = []
     val_col = []
@@ -151,3 +151,95 @@ def plot_celltypes_in_section(adata, ct_key="celltype", s=0.5, figsize=(6,6), sa
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+def _get_gene_set_sum_of_log1p(layer, adata, gene_list):
+    """
+    For each cell, compute sum_j log1p(expr[cell, gene_j]).
+    """
+    gene_idx = [adata.var_names.get_loc(g) for g in gene_list]
+
+    if sp.issparse(layer):
+        sub = layer[:, gene_idx].toarray()
+    else:
+        sub = layer[:, gene_idx]
+
+    # sum of log1p over genes
+    return np.log1p(sub).sum(axis=1).ravel()
+
+
+def plot_propagation_results_for_gene_set(
+    adata,
+    gene_list,
+    orig_layer,
+    pert_layer,
+    temp_layer,
+    fig_title,
+    save_path,
+    point_size=0.1,
+):
+    """
+    Plot 3 side-by-side panels for the *sum of log1p* over gene_list:
+      left:   original
+      center: perturbed predicted
+      right:  tempered predicted
+    And draw a colorbar on the right.
+    """
+    coordinates = adata.obsm["spatial"]
+
+    def _get_gene_set_sum_of_log1p(layer, adata, gene_list):
+        """
+        For each cell, compute sum_j log1p(expr[cell, gene_j]).
+        """
+        gene_idx = [adata.var_names.get_loc(g) for g in gene_list]
+
+        if sp.issparse(layer):
+            sub = layer[:, gene_idx].toarray()
+        else:
+            sub = layer[:, gene_idx]
+
+        # sum of log1p over genes
+        return np.log1p(sub).sum(axis=1).ravel()
+
+    orig = _get_gene_set_sum_of_log1p(orig_layer, adata, gene_list)
+    pert = _get_gene_set_sum_of_log1p(pert_layer, adata, gene_list)
+    temp = _get_gene_set_sum_of_log1p(temp_layer, adata, gene_list)
+
+    # global min/max
+    vmin, vmax = 0, 6
+
+    fig, axes = plt.subplots(1, 3, figsize=(11, 4), sharex=True, sharey=True)
+
+    panel_info = [
+        (axes[0], orig, "Original (sum log1p)"),
+        (axes[1], pert, "Perturbed Predicted (sum log1p)"),
+        (axes[2], temp, "Tempered (sum log1p)"),
+    ]
+
+    scatter_mappable = None
+    for ax, vals, title in panel_info:
+        sc = ax.scatter(
+            coordinates[:, 0],
+            coordinates[:, 1],
+            c=vals,
+            cmap="afmhot",
+            s=point_size,
+            vmin=vmin,
+            vmax=vmax,
+            rasterized=True,
+        )
+        ax.set_title(title, fontsize=10)
+        ax.axis("off")
+        scatter_mappable = sc
+
+    # Colorbar
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.70])
+    cbar = fig.colorbar(scatter_mappable, cax=cbar_ax)
+    cbar.set_label("sum log1p(expression)", fontsize=10)
+    cbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(fig_title, fontsize=12)
+    fig.tight_layout(rect=[0, 0, 0.90, 0.95])
+    plt.show()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
