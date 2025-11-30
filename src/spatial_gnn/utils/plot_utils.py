@@ -99,3 +99,55 @@ def plot_gene_in_section(adata, gene, layer, title, save_dir):
         bbox_inches="tight",
         dpi=300
     )
+
+
+def plot_celltypes_in_section(adata, ct_key="celltype", s=0.5, figsize=(6,6), save_path=None):
+    """
+    Plot all cells in the section colored by their cell type label.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Contains adata.obsm["spatial"] and adata.obs[ct_key].
+    ct_key : str
+        Column in adata.obs with cell type labels.
+    s : float
+        Scatterpoint size.
+    figsize : tuple
+        Figure size.
+    save_path : str or None
+        If provided, save the figure to this path.
+    """
+
+    coords = adata.obsm["spatial"]
+    celltypes = adata.obs[ct_key].astype(str).values
+
+    # unique categories
+    unique_ct = np.unique(celltypes)
+
+    # color palette
+    cmap = plt.get_cmap("tab20")
+    colors = {ct: cmap(i % 20) for i, ct in enumerate(unique_ct)}
+
+    # map each cell to a color
+    cell_colors = [colors[ct] for ct in celltypes]
+
+    # plot
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.scatter(
+        coords[:, 0], coords[:, 1],
+        c=cell_colors,
+        s=s,
+        rasterized=True
+    )
+    ax.axis("off")
+
+    # optional legend
+    handles = [plt.Line2D([0], [0], marker='o', color='w',
+                          label=ct, markerfacecolor=colors[ct], markersize=6)
+               for ct in unique_ct]
+    ax.legend(handles=handles, bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=6)
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.show()

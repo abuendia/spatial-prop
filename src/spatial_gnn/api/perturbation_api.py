@@ -310,3 +310,40 @@ def predict_perturbation_effects(
     )
     print("Perturbation prediction completed successfully!")
     return adata_result
+
+if __name__ == "__main__":
+    adata_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw/aging_coronal.h5ad"
+    model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/aging_coronal_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
+    exp_name = "aging_coronal_perturbed_mouse_57"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_ids = ["57"]
+
+    adata = sc.read_h5ad(adata_path)
+
+    production_genes = ["Ifng", "Il6", "Tnf", "Il1a", "Il1b", "Jun", "Apoe", "B2m", "C1qa", "Cd69", "Cd9", "Lyz2"]
+
+    # for all production genes, multiply by 10 in T cells and microglia
+    perturbation_dict = {
+        "T cell": {gene: 10.0 for gene in production_genes},
+        "Microglia": {gene: 10.0 for gene in production_genes},
+    }
+    print(perturbation_dict)
+
+    saved_path = create_perturbation_input_matrix(
+        adata,
+        perturbation_dict,
+        mask_key='perturbed_input',
+        save_path=f"data/perturbed_adata/{exp_name}_perturbed.h5ad",
+        normalize_total=True,
+    )
+    print(f"Saved perturbed adata to: {saved_path}")
+    result_adata = predict_perturbation_effects(
+        saved_path,
+        model_path,
+        exp_name,
+        device=device,
+        use_ids=use_ids,
+        whole_tissue=True,
+    )
+    print(f"Predicted perturbation effects for {use_ids}")
+    result_adata.write(f"data/perturbed_adata/{exp_name}_result.h5ad")
