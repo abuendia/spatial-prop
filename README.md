@@ -53,7 +53,7 @@ Training the SpatialProp GNN can be done through the accompanying lightweight [A
         **training_args,
     )
 
-Setting `"debug": True` in the training config can be used for quick testing. Note that setting `"do eval": True` computes Pearson correlation, Spearman correlation, and MAE metrics between predictions and ground truth as reported in the preprint. An equivalent bash script for launching training is found [here](./bash/run_train_gnn_batch.sh).
+Setting `"debug": True` in the training config can be used for quick testing. Note that setting `"do_eval": True` computes Pearson correlation, Spearman correlation, and MAE metrics between predictions and ground truth as reported in the preprint. An equivalent bash script for launching training is found [here](./bash/run_train_gnn_batch.sh).
 
 ## Deploy SpatialProp with a trained GNN: Inflammatory signaling example
 
