@@ -3,7 +3,7 @@ set -uo pipefail
 
 # ---- config ----
 GPUS=(0 1 2 3)
-BASE=./
+BASE=.
 PY=$BASE/src/spatial_gnn/scripts/run_expression_baselines.py
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
 BASELINE_TYPE="khop_mean"
@@ -45,5 +45,4 @@ for dataset in "${DATASETS[@]}"; do
 done
 
 wait
-exec 3>&- 3<&-
 echo "All datasets finished."

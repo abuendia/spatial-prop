@@ -26,7 +26,6 @@ def train(
     for batch in loader:
         batch = batch.to(device)
         center_celltypes = [model.celltypes_to_index[item[0]] for item in batch.center_celltype]
-        breakpoint()
         center_ct = torch.tensor(center_celltypes, device=device, dtype=torch.long)
 
         # Compute baseline and adjust targets if predicting residuals

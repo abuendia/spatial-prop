@@ -11,7 +11,9 @@ from collections import Counter
 import torch
 import torch.nn.functional as F
 
-from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
+from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
+from spatial_gnn.models.trainers import train, train_celltype_model, test
+from spatial_gnn.models.losses import BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.dataset_utils import get_dataset_info_from_config, create_dataloader_from_dataset
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
@@ -535,7 +537,6 @@ def main():
         gene_list=args.gene_list,
         normalize_total=args.normalize_total,
         debug=args.debug,
-        debug_subset_size=args.debug_subset_size,
         device=args.device,
         genept_embeddings=args.genept_embeddings,
         model_save_dir=model_save_dir,

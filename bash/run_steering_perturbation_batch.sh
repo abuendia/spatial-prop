@@ -4,10 +4,10 @@ set -uo pipefail
 # ---- config ----
 GPUS=(0 1 2 3)
 JOBS_PER_GPU=2 # concurrent jobs per GPU
-BASE=./
+BASE=.
 PY=$BASE/src/spatial_gnn/scripts/run_steering_perturbation.py
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
-MODEL_TYPE=("model")
+MODEL_TYPE=("global_mean" "khop_mean" "model")
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
 
@@ -44,6 +44,7 @@ for dataset in "${DATASETS[@]}"; do
         --num_props 10 \
         --exp_name "$dataset" \
         --model_type "$model_type" \
+        --model_path "$BASE/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/${dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth" \
         >"$log" 2>&1
 
       status=$?
@@ -55,5 +56,4 @@ for dataset in "${DATASETS[@]}"; do
 done
 
 wait
-exec 3>&- 3<&-
 echo "All datasets finished."

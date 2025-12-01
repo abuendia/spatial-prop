@@ -4,7 +4,7 @@ set -uo pipefail
 # ---- config ----
 GPUS=(0 1 2 3)
 JOBS_PER_GPU=2 # how many concurrent jobs per GPU
-BASE=./
+BASE=.
 PY=$BASE/src/spatial_gnn/scripts/train_expression_gnn.py
 GENEPT_EMBEDS_PATH="./data/genept_embeds/zenodo/GenePT_gene_embedding_ada_text.pickle"
 DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
@@ -136,7 +136,7 @@ for dataset in "${DATASETS[@]}"; do
       fi
 
       ts=$(date +%Y%m%d_%H%M%S)
-      log="$LOGDIR/residuals_${dataset}_${EXP_NAME}_${ts}.log"
+      log="$LOGDIR/train_expression_gnn_${dataset}_${EXP_NAME}_${ts}.log"
       echo "[$(date +%T)] start $dataset $EXP_NAME on GPU $gpu -> $log"
 
       CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
@@ -173,5 +173,4 @@ for dataset in "${DATASETS[@]}"; do
 done
 
 wait
-exec 3>&- 3<&-
 echo "All datasets finished."

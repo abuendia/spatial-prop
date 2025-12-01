@@ -10,7 +10,7 @@ from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
 from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset, load_model_from_path
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
+from spatial_gnn.models.baselines import global_mean_baseline_batch, khop_mean_baseline_batch
 from spatial_gnn.utils.perturbation_utils import perturb_by_multiplier
 
 
