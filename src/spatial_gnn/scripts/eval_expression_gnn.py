@@ -4,25 +4,21 @@ import pickle
 import os
 import argparse
 from tqdm import tqdm
-
-import matplotlib.pyplot as plt
-import matplotlib
-import seaborn as sns
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-sns.set_style("ticks")
-
-import torch
-from torch_geometric import profile
-from torch_geometric.loader import DataLoader
 from sklearn.metrics import r2_score
 from scipy.stats import pearsonr, spearmanr
 
-from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
-from spatial_gnn.models.gnn_model import GNN, CellTypeGNN
-from spatial_gnn.models.mean_baselines import khop_mean_baseline_batch
+import torch
+
+from spatial_gnn.utils.dataset_utils import (
+    create_dataloader_from_dataset,
+    load_dataset_config,
+    parse_center_celltypes,
+    parse_gene_list,
+    load_model_from_path
+)
+from spatial_gnn.models.baselines import khop_mean_baseline_batch
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.plot_utils import plot_loss_curves
+from spatial_gnn.utils.metric_utils import robust_nanmean
 
 
 def main():
@@ -37,15 +33,13 @@ def main():
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
     parser.add_argument("--gene_list", help="Path to file containing list of genes to use (optional)", type=str, default=None)
+    parser.add_argument("--model_path", help="Path to model to use", type=str, required=True)
     parser.add_argument("--debug", help="Enable debug mode with subset of data for quick testing", action="store_true")
     args = parser.parse_args()
 
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
     
-    # set which model to use
-    use_model = "model"
-
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
@@ -119,50 +113,19 @@ def main():
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
     
-    all_test_data = []
-    for f in tqdm(test_dataset.processed_file_names):
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
-    test_loader = DataLoader(test_dataset, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    print(len(test_dataset), flush=True)
-
-    cell_type_model = CellTypeGNN(
-        hidden_channels=64,
-        input_dim=int(train_dataset.get(0).x.shape[1]),
-        num_layers=k_hop,
-        method="GIN",
-        pool="add",
-        celltypes_to_index=celltypes_to_index,
+    _, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
     )
 
-    cell_type_model_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/expression_with_celltype_decoupled_no_genept_softmax_ct/zeng_expression_2hop_2augment_expression_none/weightedl1_1en04/celltype_model.pth"
-    cell_type_model.load_state_dict(torch.load(cell_type_model_path))
-    
-    model = GNN(
-        hidden_channels=64,
-        input_dim=int(train_dataset.get(0).x.shape[1]),
-        output_dim=len(train_dataset.get(0).y),
-        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
-        method="GIN", 
-        pool="add", 
-        num_layers=k_hop,
-        celltypes_to_index=celltypes_to_index,
-        predict_celltype=True,
-        train_multitask=False,
-        celltype_model=cell_type_model,  # Pass pre-trained model for decoupled training
-        ablate_gene_expression=False,
-        use_one_hot_ct=False,
-        attention_pool=None,
-    )
-    print(f"Model initialized on {device}")
-
+    model, config = load_model_from_path(args.model_path, device)
+    model_save_dir = os.path.dirname(args.model_path)
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
-    model_save_dir = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/output/final_exps/expression_with_celltype_decoupled_no_genept_softmax_ct/zeng_expression_2hop_2augment_expression_none/weightedl1_1en04/"
-
-    model.load_state_dict(torch.load(os.path.join(model_save_dir, f"{use_model}.pth")), strict=False)
-    model.to(device)
-    print(profile.count_parameters(model), flush=True)
-
     eval_model(model, test_loader, model_save_dir, device, inject, gene_names)
 
 
@@ -422,15 +385,6 @@ def eval_model(model, test_loader, save_dir, device="cuda", inject=False, gene_n
         pickle.dump(ct_mean_stats_dict_nonzero, f)        
     print("Finished cell type analysis.", flush=True)
     
-
-def robust_nanmean(x):
-    nmx = np.nanmean(x) if np.count_nonzero(~np.isnan(x))>1 else np.mean(x)
-    return (nmx)
-
-def robust_nanmedian(x):
-    nmx = np.nanmedian(x) if np.count_nonzero(~np.isnan(x))>1 else np.median(x)
-    return (nmx)
-
 
 if __name__ == "__main__":
     main()

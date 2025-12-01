@@ -22,18 +22,14 @@ import spatial_gnn.utils.dataset_utils as dataset_utils
 
 class SpatialAgingCellDataset(Dataset):
     '''
-    Class for building spatial cell subgraphs from the MERFISH anndata file
-        - Nodes are cells and featurized by one-hot encoding of cell type
+    Class for building spatial cell subgraphs from anndata .h5ad files
+        - Nodes are cells and featurized by one-hot encoding of expression or cell type
         - Edges are trimmed Delaunay spatial graph connections
         - Graphs are k-hop neighborhoods around cells and labeled by average peripheral age acceleration
-    
-    Relies on build_spatial_graph() from ageaccel_proximity.py
-        Use `from ageaccel_proximity import *` when importing libraries
         
     Arguments:
         root [str] - root directory path
-        transform [None] - not implemented
-        pre_transform [None] - not implemented
+        dataset_prefix [str] - prefix for dataset name
         normalize_total [bool] - whether or not to normalize gene expression data to total (don't use for scaled expression inputs)
         raw_filepaths [lst of str] - list of paths to anndata .h5ad files of spatial transcriptomics data
         gene_list [str or None] - path to file containing list of genes to use, or None to compute from AnnData
@@ -45,6 +41,7 @@ class SpatialAgingCellDataset(Dataset):
         sub_id [str] - key in adata.obs to separate graphs by id
         use_ids [lst of lst of str, None] - list of list of sub_id values to use for each anndata dataset; if None, then uses all data
         center_celltypes [str or lst] - 'all' to use all cell types, otherwise list of cell types to draw subgraphs from
+        whole_tissue [bool] - whether to use the whole tissue (all cells) or not
         num_cells_per_ct_id [str] - number of cells per cell type per id to take
         k_hop [int] - k-hop neighborhood subgraphs to take
         augment_hop [int] - k-hop neighbors to also take induced subgraphs from (augments number of graphs)
@@ -52,44 +49,47 @@ class SpatialAgingCellDataset(Dataset):
         dispersion_factor [0 <= float < 1] - factor for dispersion of augmentation sampling of rare graph labels; higher means more rare samples
         radius_cutoff [float] - radius cutoff for Delaunay triangulation edges
         celltypes_to_index [dict] - dictionary mapping cell type labels to integer index
-        use_mp [bool] - whether to use multiprocessing for sample processing (default: False)
+        embedding_json [str] - path to json file containing pretrained cell embeddings
+        use_perturbed_expression [bool] - whether to use perturbed expression data
+        perturbation_mask_key [str] - key in adata.obsm to use for perturbed gene expression
+        batch_size [int] - batch size for saving subgraphs
+        overwrite [bool] - whether to overwrite existing dataset
+        use_mp [bool] - whether to use multiprocessing for sample processing
+        debug [bool] - whether to run in debug mode
     '''
-    def __init__(self, 
-                 root=".",
-                 dataset_prefix="",
-                 transform=None, 
-                 pre_transform=None,
-                 normalize_total=True,
-                 raw_filepaths=None,
-                 gene_list=None,
-                 processed_folder_name="data/gnn_datasets",
-                 subfolder_name=None,
-                 target="expression",
-                 node_feature="celltype",
-                 inject_feature=None,
-                 sub_id="mouse_id",
-                 use_ids=None,
-                 center_celltypes='all', 
-                 whole_tissue=False,
-                 num_cells_per_ct_id=1,
-                 k_hop=2,
-                 augment_hop=0,
-                 augment_cutoff=0,
-                 dispersion_factor=0,
-                 radius_cutoff=200,
-                 celltypes_to_index=None,
-                 embedding_json=None,
-                 perturbation_mask_key="perturbed_input",
-                 batch_size=500,
-                 overwrite=False,
-                 debug=False,
-                 use_mp=False,
-                 use_perturbed_expression=False,
-                ):
+    def __init__(
+        self, 
+        root=".",
+        dataset_prefix="",
+        normalize_total=True,
+        raw_filepaths=None,
+        gene_list=None,
+        processed_folder_name="data/gnn_datasets",
+        subfolder_name=None,
+        target="expression",
+        node_feature="celltype",
+        inject_feature=None,
+        sub_id="mouse_id",
+        use_ids=None,
+        center_celltypes='all', 
+        whole_tissue=False,
+        num_cells_per_ct_id=1,
+        k_hop=2,
+        augment_hop=0,
+        augment_cutoff=0,
+        dispersion_factor=0,
+        radius_cutoff=200,
+        celltypes_to_index=None,
+        embedding_json=None,
+        use_perturbed_expression=False,
+        perturbation_mask_key="perturbed_input",
+        batch_size=500,
+        overwrite=False,
+        use_mp=False,
+        debug=False,
+    ):
         self.root=root
         self.dataset_prefix=dataset_prefix
-        self.transform=transform
-        self.pre_transform=pre_transform
         self.normalize_total=normalize_total
         self.raw_filepaths=raw_filepaths
         self.gene_list = gene_list
@@ -159,7 +159,6 @@ class SpatialAgingCellDataset(Dataset):
         )
         if self.use_perturbed_expression:
             data_dir += f"_perturbed"
-
         data_dir += self._subset_suffix
 
         if self.subfolder_name is not None:
@@ -188,7 +187,9 @@ class SpatialAgingCellDataset(Dataset):
         return gene_names
     
     def process(self):
-
+        '''
+        Process the dataset and save the subgraphs to the processed directory
+        '''
         manifest = {
             "batches": [],
             "augment_batches": [],
@@ -230,7 +231,7 @@ class SpatialAgingCellDataset(Dataset):
                         
             # normalize by total genes
             if self.normalize_total is True:
-                print("  Normalizing data")
+                print("Normalizing data")
                 sc.pp.normalize_total(adata, target_sum=adata.shape[1])
             
             # handle missing genes (-1 token, indicators added later)
@@ -259,7 +260,7 @@ class SpatialAgingCellDataset(Dataset):
             if self.debug:
                 sub_ids_arr = sub_ids_arr[:1]
             
-            print(f"  Processing {len(sub_ids_arr)} samples")
+            print(f"Processing {len(sub_ids_arr)} samples")
             
             # Process samples either with multiprocessing or sequentially
             if self.use_mp:
@@ -269,15 +270,13 @@ class SpatialAgingCellDataset(Dataset):
                     sample_args.append((sid, sid_idx, adata, gene_names, rfi, raw_filepath))
                 
                 # Determine number of processes (use min of available CPUs and number of samples)
-                num_processes = min(mp.cpu_count(), len(sub_ids_arr), 4)  # Cap at 4 to avoid memory issues
-                print(f"  Using {num_processes} processes for parallel sample processing")
-                
-                # Process samples in parallel
+                num_processes = min(mp.cpu_count(), len(sub_ids_arr), 4) # cap at 4
+                print(f"Using {num_processes} processes for parallel sample processing")
                 with mp.Pool(processes=num_processes) as pool:
                     results = pool.map(self._process_single_sample, sample_args)
             else:
                 # Process samples sequentially
-                print(f"  Using sequential processing for {len(sub_ids_arr)} samples")
+                print(f"Using sequential processing for {len(sub_ids_arr)} samples")
                 results = []
                 for sid_idx, sid in tqdm(enumerate(sub_ids_arr), total=len(sub_ids_arr)):
                     sample_args = (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
@@ -400,7 +399,6 @@ class SpatialAgingCellDataset(Dataset):
             else:
                 absglcutoff = np.quantile(np.abs(graph_labels), self.augment_cutoff)
             
-            
             # get subgraphs and save for augmentation
             for cidx in augment_idxs:               
                 # get subgraph
@@ -462,24 +460,11 @@ class SpatialAgingCellDataset(Dataset):
         return subgraph_data_list, augment_data_list, len(subgraph_data_list), len(augment_data_list)
 
     def _process_single_sample(self, args):
-        """
-        Process a single sample ID.
-        
-        Parameters
-        ----------
-        args : tuple
-            (sid, sid_idx, adata, gene_names, rfi, raw_filepath)
-            
-        Returns
-        -------
-        tuple
-            (subgraph_data_list, augment_data_list, subgraph_count, augment_count)
-        """
         sid, sid_idx, adata, gene_names, rfi, raw_filepath = args
         
         print(f"Sample {sid_idx+1}: {sid} (PID: {os.getpid()})")
         
-        # subset to each sample
+        # subset to sample
         sub_adata = adata[(adata.obs[self.sub_id]==sid)]
         
         # Delaunay triangulation with pruning of > 200um distances

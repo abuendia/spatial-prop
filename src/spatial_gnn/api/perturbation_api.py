@@ -2,22 +2,19 @@
 Training and inference API for spatial GNN perturbation predictions.
 """
 import numpy as np
-import pandas as pd
 import scanpy as sc
 import anndata as ad
 import torch
-from torch_geometric.loader import DataLoader
 from scipy.sparse import issparse
 from typing import List, Dict, Union, Optional, Tuple, Any
 import os
-import tqdm 
 
-from spatial_gnn.scripts.train_gnn import train_model_from_scratch
+from spatial_gnn.scripts.train_expression_gnn import train_model_from_scratch
+from spatial_gnn.scripts.eval_expression_gnn import eval_model
 from spatial_gnn.utils.dataset_utils import load_model_from_path
-from spatial_gnn.models.gnn_model import predict
+from spatial_gnn.models.inference import predict
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config, create_dataloader_from_dataset
-from spatial_gnn.scripts.eval_gnn_expression import eval_model
+from spatial_gnn.utils.dataset_utils import create_dataloader_from_dataset
 
 
 def train_perturbation_model(
@@ -51,38 +48,54 @@ def train_perturbation_model(
     Parameters
     ----------
     k_hop : int, default=2
-        k-hop neighborhood size
+        Number of hops for k-hop neighborhood size
     augment_hop : int, default=2
         Number of hops for graph augmentation
     center_celltypes : str, default="all"
         Cell types to center graphs on (comma-separated or "all")
     node_feature : str, default="expression"
         Node feature type
-    inject_feature : Optional[str], default=None
-        Feature injection type
-    gene_list : Optional[str], default=None
-        Path to gene list file
-    num_cells_per_ct_id : int, default=100
-        Number of cells per cell type per ID
-    normalize_total : bool, default=True
-        Whether to normalize total gene expression
     learning_rate : float, default=1e-4
         Learning rate for training
     loss : str, default="weightedl1"
         Loss function type
     epochs : int, default=100
         Number of training epochs
-    debug : bool, default=False
-        Enable debug mode
-    debug_subset_size : int, default=100
-        Number of cells for debug mode
+    num_cells_per_ct_id : int, default=100
+        Number of cells to use per cell type per ID
+    inject_feature : Optional[str], default=None
+        Feature type for injection at last layer (e.g. "center_celltype")
+    dataset : Optional[str], default=None
+        Dataset name (aging_coronal, aging_sagittal, etc.)
+    base_path : Optional[str], default=None
+        Base path to the data directory
+    file_path : Optional[str], default=None
+        Path to the data file (.h5ad)
+    train_ids : Optional[List[str]], default=None
+        List of train IDs
+    test_ids : Optional[List[str]], default=None
+        List of test IDs
+    exp_name : Optional[str], default=None
+        Experiment name
+    gene_list : Optional[str], default=None
+        Path to gene list file
+    normalize_total : bool, default=True
+        Whether to normalize total gene expression
+    predict_celltype : bool, default=False
+        Whether to predict cell type in addition to expression
+    pool : Optional[str], default=None
+        Pooling method to use for graph aggregation ("ASAPooling", "SAGPooling", "GlobalAttention", "center")
+    predict_residuals : bool, default=False
+        Whether to predict residuals of gene expression compared to mean baseline
+    do_eval : bool, default=False
+        Whether to evaluate the model after training
     device : str, default="cuda" if available else "cpu"
         Device to run training on
         
     Returns
     -------
     Tuple[Any, Dict, str]
-        (trained_model, model_config, model_path)
+        test_loader, gene_names, (model, model_config, trained_model_path)
     """
     print("Training new perturbation model from scratch...")
     # Create save directory structure
@@ -148,7 +161,7 @@ def create_perturbation_input_matrix(
     else:
         X = np.asarray(X)
 
-    perturbed = X.copy()   # start from normalized expression
+    perturbed = X.copy() # start from normalized expression
 
     for cell_type, gene_multipliers in perturbation_dict.items():
         cell_mask = perturbed_adata.obs['celltype'] == cell_type
@@ -209,38 +222,28 @@ def predict_perturbation_effects(
         Path to the saved model state dictionary (.pth file)
     exp_name : str
         Name of the experiment
-    perturbation_dict : Dict[str, Dict[str, float]]
-        Dictionary specifying perturbations:
-        - Keys: cell type names
-        - Values: dictionaries with gene names as keys and multipliers as values
-        Example: {'T cell': {'Igf2': 0.0}, 'NSC': {'Sox9': 2.0}}
-    perturbation_mask_key : str, default='perturbed_input'
-        Key to store the perturbation mask in adata.obsm
     device : str, default="cuda" if available else "cpu"
         Device to run the model on
-    **kwargs
-        Additional arguments (for compatibility)
-    
+    use_ids : Optional[List[str]], default=None
+        List of IDs to use
+    whole_tissue : bool, default=True
+        Whether to use the whole tissue for prediction
+
     Returns
     -------
     anndata.AnnData
         Updated AnnData object with perturbation effects stored in:
-        - adata.layers['perturbation_effects']: Predicted perturbation effects
-        - adata.obsm[perturbation_mask_key]: Applied perturbation mask
+        - adata.layers['predicted_perturbed']: Predicted perturbed expression from GNN output
+        - adata.layers['predicted_unperturbed']: Predicted unperturbed expression from GNN output
+        - adata.layers['predicted_tempered']: Predicted tempered expression (after SparseRenorm) from GNN output
     """
     # Load the pretrained model
     test_adata = sc.read_h5ad(adata_path)
 
     model, model_config = load_model_from_path(model_path, device)
     print(f"Loaded pretrained model from: {model_path}")
+    celltypes_to_index = model_config['celltypes_to_index']
     
-    dataset = "aging_coronal"
-    base_path = "/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/raw"
-    _, file_path, _, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
-
-    if use_ids is None:
-        use_ids = test_ids
-
     # Create graphs from the input AnnData
     print("Creating graphs from input data...")
     test_dataset = SpatialAgingCellDataset(
@@ -300,9 +303,9 @@ def predict_perturbation_effects(
 
     # Get predictions for both unperturbed and perturbed data, and apply tempering
     adata_result = predict(
-        model, 
-        test_adata, 
-        test_loader, 
+        model=model, 
+        adata=test_adata, 
+        dataloader=test_loader, 
         perturbed_dataloader=perturbed_test_loader,
         use_ids=use_ids,
         temper_method="distribution_renormalize",

@@ -6,19 +6,17 @@ import tqdm
 import scanpy as sc
 import json
 import os
-import sys
 from collections import Counter
 
 import torch
 import torch.nn.functional as F
-from torch_geometric.loader import DataLoader
 
-from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss, _get_expression_params, _get_celltype_params
+from spatial_gnn.models.gnn_model import GNN, CellTypeGNN, train, train_celltype_model, test, BMCLoss, Neg_Pearson_Loss, WeightedL1Loss
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.utils.dataset_utils import get_dataset_config, create_dataloader_from_dataset
+from spatial_gnn.utils.dataset_utils import get_dataset_info_from_config, create_dataloader_from_dataset
 from spatial_gnn.utils.logging_utils import setup_logging_to_file
 from spatial_gnn.utils.metric_utils import compute_celltype_accuracy
-from spatial_gnn.scripts.eval_gnn_expression import eval_model
+from spatial_gnn.scripts.eval_expression_gnn import eval_model
 
 
 def train_model_from_scratch(
@@ -55,9 +53,9 @@ def train_model_from_scratch(
     """
     Train a GNN model from scratch.
     
-    It supports two modes:
-    1. Dataset mode: Provide dataset name and base_path
-    2. AnnData mode: Provide AnnData object directly
+    Supports two modes:
+    1. Dataset mode: Provide dataset name and base_path present in datasets.json
+    2. Provide anndata file path directly with train and test IDs
     
     Parameters
     ----------
@@ -68,50 +66,57 @@ def train_model_from_scratch(
     center_celltypes : Union[str, List[str], None]
         Cell types to center graphs on
     node_feature : str
-        Node feature type
-    inject_feature : Optional[str]
-        Inject feature type
+        Node feature type ("celltype", "celltype_age", "celltype_region", "celltype_age_region", "expression", "celltype_expression")
     learning_rate : float
         Learning rate for training
     loss : str
         Loss function type
     epochs : int
         Number of training epochs
+    num_cells_per_ct_id : int
+        Number of cells per cell type to use for training
+    inject_feature : Optional[str]
+        Inject feature type for fusion at last layer
     dataset : Optional[str], default=None
-        Dataset name (aging_coronal, aging_sagittal, etc.) - required if not using AnnData
+        Dataset name (aging_coronal, aging_sagittal, etc.) - required if not using file_path
     base_path : Optional[str], default=None
-        Base path to the data directory - required if not using AnnData
-    exp_name : Optional[str], default=None
-        Experiment name
+        Base path to the data directory - required if not using file_path
     file_path : Optional[str], default=None
         Path to AnnData object to use directly - required if not using dataset+base_path
+    exp_name : Optional[str], default=None
+        Experiment name
+    gene_list : Optional[List[str]], default=None
+        List of genes to use
     train_ids : Optional[List[str]], default=None
         List of train IDs
     test_ids : Optional[List[str]], default=None
         List of test IDs
-    gene_list : Optional[List[str]], default=None
-        List of genes to use
     normalize_total : bool, default=True
         Whether to normalize total gene expression
-    debug : bool, default=False
-        Enable debug mode
-    device : str, default="cuda" if available else "cpu"
-        Device to train on
+    model_save_dir : Optional[str], default=None
+        Directory to save model
     genept_embeddings : Optional[str], default=None
         Path to file containing GenePT embeddings
+    genept_strategy : Optional[str], default=None
+        Strategy to use for GenePT embeddings ("early_fusion", "late_fusion", "none")
+    predict_celltype : bool, default=False
+        Whether to predict cell type in addition to expression
     train_multitask : bool, default=False
-        Whether to train a multitask model
+        Whether to train a multitask model for expression and cell type prediction
     use_oracle_ct : bool, default=False
-        Whether to use oracle cell type for cell type prediction
+        Whether to use oracle cell type during expression prediction (exp only)
+    ablate_gene_expression : bool, default=False
+        Whether to ablate gene expression for prediction (exp only)
     use_one_hot_ct : bool, default=False
-        Whether to use one-hot encoding for cell type prediction
+        Whether to use one-hot encoding for cell type prediction (if False, softmax)
+    pool : Optional[str], default=None
+        Pooling method to use for graph aggregation ("ASAPooling", "SAGPooling", "GlobalAttention", "center")
     predict_residuals : bool, default=False
-        Whether to predict residuals of gene expression
-    Returns
-    -------
-    Tuple[GNN, str]
-        - Trained model
-        - Path to saved model
+        Whether to predict residuals of gene expression compared to mean baseline
+    device : str, default="cuda" if available else "cpu"
+        Device to train on
+    debug : bool, default=False
+        Enable debug mode
     """
     # If using custom file_path, train_ids, and test_ids
     if file_path and train_ids and test_ids:
@@ -120,7 +125,7 @@ def train_model_from_scratch(
         train_ids = list(train_ids)
         test_ids = list(test_ids)
     else:
-        _, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_config(dataset, base_path)
+        _, file_path, train_ids, test_ids, celltypes_to_index = get_dataset_info_from_config(dataset, base_path)
     
     if inject_feature is not None and inject_feature.lower() == "none":
         inject_feature = None
@@ -212,7 +217,6 @@ def train_model_from_scratch(
     gene_names = [gene.upper() for gene in train_dataset.gene_names]
 
     # For decoupled training, first train a separate cell type model
-    idx_to_ct = {v: k for k, v in celltypes_to_index.items()}
     celltype_model = None
     if predict_celltype and not train_multitask and not use_oracle_ct:
         # Create separate cell type model

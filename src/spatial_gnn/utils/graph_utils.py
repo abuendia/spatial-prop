@@ -1,14 +1,7 @@
-'''
-Functions for computing age acceleration and running cell proximity effect analysis
-'''
-
-
 import numpy as np
 import pandas as pd
-import scanpy as sc
 import squidpy as sq
-import anndata as ad
-from scipy.stats import ttest_ind, mannwhitneyu
+from scipy.stats import ttest_ind
 from sklearn.neighbors import BallTree
 
 
@@ -22,10 +15,6 @@ def get_age_acceleration (adata):
     # round for aesthetic purposes (and accuracy)
     adata.obs["age"] = np.array([round(a,2) for a in adata.obs['age']])
     
-    # raw age acceleration
-    #adata.obs['age_acceleration'] = adata.obs['predicted_age'].values-adata.obs['age'].values
-    #adata.obs['age_acceleration'] = adata.obs['age_acceleration'].astype('float64')
-
     # normalized using average predicted age instead of calendar age
     avg_pred_age = adata.obs["predicted_age"].values.copy()
     for mouse_id in np.unique(adata.obs['mouse_id']):
@@ -175,8 +164,7 @@ def get_paired_proximity_labels (adata, cutoff, celltype, cutoff_multiplier=1, r
     return (prox_labels)
 
 
-def get_stats_df (adata, near_ages, cutoff_multiplier, celltype, ct, full_adata, label=None,
-                  min_pairs=50):
+def get_stats_df(adata, near_ages, cutoff_multiplier, celltype, ct, label=None, min_pairs=50):
     '''
     Computes all statistics associated with proximity effect analysis including the proximity effect
     
@@ -231,7 +219,6 @@ def get_stats_df (adata, near_ages, cutoff_multiplier, celltype, ct, full_adata,
                           columns=["label", "Near Cell", "AgeAccel Cell", "n", "t", "p", "Aging Effect", "Near Freq", "Near Num"])
     
     return (df)
-
 
 
 def build_spatial_graph (adata, method="fixed_radius", spatial="spatial", radius=None, n_neighbors=20, set_diag=True):

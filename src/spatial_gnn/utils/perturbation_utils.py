@@ -1,12 +1,5 @@
 import numpy as np
-import pandas as pd
-import scanpy as sc
-import squidpy as sq
-import anndata as ad
-import pickle
-import os
-import copy
-import random
+
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
@@ -53,19 +46,15 @@ def temper(true_expn, pred_expn, pred_perturb_expn, method="distribution_renorma
         return (p)
     
     if method == "none":
-        
-        # pass in raw predictions
         true_perturb_expn = pred_perturb_expn
     
     elif method == "prediction_delta":
-        
         # computes effect of perturbation in prediction space
         diff = pred_perturb_expn - pred_expn
         diff[torch.abs(diff) < torch.quantile(torch.abs(diff), 0.9)] = 0 # clip to top 10%
         true_perturb_expn = true_expn + diff
     
     elif method == "distribution":
-        
         # computes prediction error distribution to calibrate
         errors = true_expn - pred_expn
         

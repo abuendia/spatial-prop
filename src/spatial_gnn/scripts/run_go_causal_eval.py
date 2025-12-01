@@ -5,12 +5,10 @@ import pickle
 import os
 import argparse
 import torch
-from torch_geometric.loader import DataLoader
-import scanpy as sc
 
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
-from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset
+from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset, load_model_from_path
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
 from spatial_gnn.utils.perturbation_utils import perturb_by_multiplier
@@ -28,6 +26,7 @@ def main():
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
     parser.add_argument("--model_type", help="model type to use", type=str, required=True)
+    parser.add_argument("--model_path", help="Path to model to use", type=str, required=True)
     parser.add_argument("--debug", help="debug mode", action="store_true")
     
     # paired terms-specific arguments
@@ -142,48 +141,9 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {save_dir}", flush=True)
 
-    model = GNN(
-        hidden_channels=64,
-        input_dim=int(train_dataset.get(0).x.shape[1]),
-        output_dim=len(train_dataset.get(0).y),
-        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
-        method="GIN", 
-        pool="center", 
-        num_layers=k_hop,
-        celltypes_to_index=celltypes_to_index,
-        predict_celltype=False,
-        train_multitask=False,
-        ablate_gene_expression=False,
-        use_one_hot_ct=False,
-    )
-    print(f"Model initialized on {device}")
-
-    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
-    model.load_state_dict(torch.load(model_save_dir), strict=False)
-    model.to(device)
-
+    model, config = load_model_from_path(args.model_path, device)
     gene_names = np.char.upper(train_dataset.gene_names.astype(str))
     go_causal_interaction(model, train_loader, test_loader, save_dir, model_type, perturb_approach, num_props, pairs_path, gene_names, debug=args.debug, device=device)
-
-def is_complete(save_file_path):
-    required_cols = ["Prop", "Normalized Forward", "Normalized Reverse", "Celltype"]
-
-    if not os.path.exists(save_file_path):
-        return False
-
-    try:
-        df = pd.read_csv(save_file_path)
-    except Exception:
-        return False
-
-    if len(df) < 1:
-        return False
-
-    if required_cols is not None:
-        missing = [c for c in required_cols if c not in df.columns]
-        if len(missing) > 0:
-            return False
-    return True
 
 def go_causal_interaction(
     model,
@@ -213,12 +173,6 @@ def go_causal_interaction(
     
     for term in tqdm(terms_list, total=len(terms_list)):
 
-        save_file_path = os.path.join(save_dir,term,f"{savename}_results.csv")
-        # check that file is complete
-        if is_complete(save_file_path):
-            print(f"Skipping {term} because it is complete", flush=True)
-            continue
-
         # read in production and response gene lists (convert to uppercase for consistency)
         production_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"production_{term}.csv"), header=None).values.flatten().astype(str))
         response_genes = np.char.upper(pd.read_csv(os.path.join(pairs_path,f"response_{term}.csv"), header=None).values.flatten().astype(str))
@@ -241,9 +195,6 @@ def go_causal_interaction(
         
         # run perturbations
         props = np.linspace(0,1,round(num_props))
-        #oneside_props = np.linspace(0,1,round((num_props+1)/2))
-        #props = np.unique(np.concatenate((-oneside_props,oneside_props)))
-        
         for prop in np.power(10,props): # powers of 10
 
             perturb_props = []

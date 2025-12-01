@@ -1,15 +1,9 @@
-import torch
 import numpy as np
-from typing import List, Optional
+from typing import Optional
 from collections import defaultdict
 
-from torch_geometric.data import Data, Batch
-
-
-from typing import Optional
 import torch
 from torch_geometric.data import Batch
-from torch_geometric.nn import global_add_pool
 
 
 def khop_mean_baseline_batch(
@@ -19,7 +13,7 @@ def khop_mean_baseline_batch(
     center_nodes: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Compute k-hop mean baseline for each center node in the batch.
+    Compute k-hop mean baseline for test-time subgraphs.
     """
     if batch_data is not None:
         x = batch_data.x                     
@@ -54,7 +48,7 @@ def khop_mean_baseline_batch(
 
 def global_mean_baseline_batch(train_loader, device="cuda") -> torch.Tensor:
     """
-    Global mean expression over all cells across all batches/graphs.
+    Global mean expression over all cells across all batches/graphs in training set.
     """
     sum_x = None
     total = 0
@@ -76,7 +70,7 @@ def global_mean_baseline_batch(train_loader, device="cuda") -> torch.Tensor:
 
 def center_celltype_global_mean_baseline_batch(train_loader, device="cuda") -> dict[int, torch.Tensor]:
     """
-    Per-celltype global mean expression over all cells of that type across all batches/graphs.
+    Per-celltype global mean expression over all cells of that type across all batches/graphs in training set.
     """
     sum_by_type: dict[int, torch.Tensor] = {}
     count_by_type: dict[int, int] = defaultdict(int)

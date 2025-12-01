@@ -1,23 +1,17 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
-import pickle
 import os
-import matplotlib.pyplot as plt
 import argparse
 import torch
-from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
 from spatial_gnn.models.gnn_model import GNN
 from spatial_gnn.utils.perturbation_utils import batch_steering_mean, batch_steering_cell
-from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset
+from spatial_gnn.utils.dataset_utils import load_dataset_config, create_dataloader_from_dataset, load_model_from_path
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
 from spatial_gnn.utils.perturbation_utils import predict, temper, get_center_celltypes
-from spatial_gnn.models.mean_baselines import (
-    global_mean_baseline_batch,
-    khop_mean_baseline_batch,
-)
+from spatial_gnn.models.mean_baselines import global_mean_baseline_batch, khop_mean_baseline_batch
 
 
 def main():
@@ -31,18 +25,20 @@ def main():
     parser.add_argument("--node_feature", help="node features key, e.g. 'celltype_age_region'", type=str, required=True)
     parser.add_argument("--inject_feature", help="inject features key, e.g. 'center_celltype'", type=str, required=True)
     parser.add_argument("--exp_name", help="experiment name", type=str, required=True)
+    parser.add_argument("--model_path", help="Path to model to use", type=str, required=True)
     parser.add_argument("--debug", help="debug mode", action="store_true")
     
     # steering-specific arguments
     parser.add_argument("--steering_approach", help="steering method to use", type=str)
     parser.add_argument("--num_props", help="number of intervals from 0 to 1", type=int)
-    parser.add_argument("--model_type", help="model type to use", type=str, default=None)
+    parser.add_argument("--model_type", help="Model type to use (global_mean, khop_mean, model)", type=str, default=None)
     
     args = parser.parse_args()
     steering_approach = args.steering_approach
     num_props = args.num_props
     props = np.linspace(0,1,num_props+1) # proportions to scale
     model_type = args.model_type
+    temper_methods = ["distribution_renormalize"]
 
     DATASET_CONFIGS = load_dataset_config()
     
@@ -51,8 +47,6 @@ def main():
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
     print(f"\n {args.dataset}", flush=True)
     
-    temper_methods = ["renormalize"]
-
     # load parameters from arguments
     dataset_config = DATASET_CONFIGS[args.dataset]
     train_ids = dataset_config['train_ids']
@@ -67,9 +61,6 @@ def main():
 
     if inject_feature.lower() == "none":
         inject_feature = None
-        inject=False
-    else:
-        inject=True
 
     # determine gpu / cpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -98,7 +89,6 @@ def main():
         overwrite=False,
         use_mp=False,
     )
-
     test_dataset = SpatialAgingCellDataset(
         subfolder_name="test",
         dataset_prefix=args.dataset,
@@ -146,26 +136,8 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     print(f"Save directory: {save_dir}", flush=True)
 
-    model = GNN(
-        hidden_channels=64,
-        input_dim=int(train_dataset.get(0).x.shape[1]),
-        output_dim=len(train_dataset.get(0).y),
-        inject_dim=int(train_dataset.get(0).inject.shape[1]) if inject is True else 0,
-        method="GIN", 
-        pool="center", 
-        num_layers=k_hop,
-        celltypes_to_index=celltypes_to_index,
-        predict_celltype=False,
-        train_multitask=False,
-        ablate_gene_expression=False,
-        use_one_hot_ct=False,
-    )
+    model, config = load_model_from_path(args.model_path, device)
     print(f"Model initialized on {device}")
-
-    model_save_dir = f"/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/results/expr_model_predict/appendix/expression_only_khop2_no_genept_softmax_ct_center_pool/{args.dataset}_expression_2hop_2augment_expression_none/weightedl1_1en04/model.pth"
-    model.load_state_dict(torch.load(model_save_dir), strict=False)
-    model.to(device)
-
     eval_model(model, train_loader, test_loader, save_dir, model_type, steering_approach, num_props, props, temper_methods, device)
     
 

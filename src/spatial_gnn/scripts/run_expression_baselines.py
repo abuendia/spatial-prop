@@ -1,31 +1,22 @@
 import numpy as np
 import pandas as pd
-import pickle
 import os
 import argparse
 from tqdm import tqdm
 
-import matplotlib.pyplot as plt
-import matplotlib
-import seaborn as sns
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-sns.set_style("ticks")
-
 import torch
-from torch_geometric import profile
 from torch_geometric.loader import DataLoader
 from sklearn.metrics import r2_score
 from scipy.stats import pearsonr, spearmanr
 
-from spatial_gnn.utils.dataset_utils import load_dataset_config, parse_center_celltypes, parse_gene_list
-from spatial_gnn.models.gnn_model import GNN
+from spatial_gnn.utils.dataset_utils import create_dataloader_from_dataset, load_dataset_config, parse_center_celltypes
 from spatial_gnn.datasets.spatial_dataset import SpatialAgingCellDataset
-from spatial_gnn.models.mean_baselines import(
+from spatial_gnn.models.baselines import(
     khop_mean_baseline_batch,
     global_mean_baseline_batch,
     center_celltype_global_mean_baseline_batch,
 )
+from spatial_gnn.utils.metric_utils import robust_nanmean, robust_nanmedian
 
 
 def main():
@@ -46,9 +37,6 @@ def main():
     # Load dataset configurations
     DATASET_CONFIGS = load_dataset_config()
     
-    # set which model to use
-    use_model = "best_model"
-
     # Validate dataset choice
     if args.dataset not in DATASET_CONFIGS:
         raise ValueError(f"Dataset must be one of: {', '.join(DATASET_CONFIGS.keys())}")
@@ -77,7 +65,6 @@ def main():
     # determine gpu / cpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device, flush=True)
-
 
     # Build cell type index
     celltypes_to_index = {}
@@ -115,27 +102,27 @@ def main():
     print("Finished processing test dataset", flush=True)
     train_dataset.process()
     print("Finished processing train dataset", flush=True)
-    
-    all_test_data, all_train_data = [], []
-    
-    for idx, f in tqdm(enumerate(train_dataset.processed_file_names), total=len(train_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(train_dataset.processed_dir, f), weights_only=False)
-        all_train_data.extend(batch_list)
-    
-    for idx, f in tqdm(enumerate(test_dataset.processed_file_names), total=len(test_dataset.processed_file_names)):
-        if args.debug and idx > 2:
-            break
-        batch_list = torch.load(os.path.join(test_dataset.processed_dir, f), weights_only=False)
-        all_test_data.extend(batch_list)
 
-    print("value of index: ", idx, flush=True)
-    train_loader = DataLoader(all_train_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    test_loader = DataLoader(all_test_data, batch_size=512, shuffle=True, pin_memory=True, num_workers=4, prefetch_factor=None, persistent_workers=False)
-    print(len(all_train_data), len(all_test_data), flush=True)
-    
-    save_dir = os.path.join("baselines",train_dataset.processed_dir.split("/")[-2])
+    _, train_loader = create_dataloader_from_dataset(
+        dataset=train_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
+    _, test_loader = create_dataloader_from_dataset(
+        dataset=test_dataset,
+        batch_size=512,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        debug=args.debug,
+    )
+
+    save_dir = os.path.join("baselines", train_dataset.processed_dir.split("/")[-2])
     os.makedirs(save_dir, exist_ok=True)
     eval_model(train_loader, test_loader, save_dir, baseline_type)
 
@@ -210,7 +197,6 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
         gene_mae.append(np.mean(np.abs(preds[:,g]-actuals[:,g])))
         gene_rmse.append(np.sqrt(np.mean((preds[:,g]-actuals[:,g])**2)))
         
-
     # cell stats
     cell_r = []
     cell_s = []
@@ -387,15 +373,6 @@ def eval_model(train_loader, test_loader, save_dir, baseline_type, device="cuda"
     )
     overall_stats_dict.to_csv(os.path.join(save_dir, "test_evaluation_stats_macro_micro.csv"), index=False)        
     print("Finished cell type analysis.", flush=True)
-
-
-def robust_nanmean(x):
-    nmx = np.nanmean(x) if np.count_nonzero(~np.isnan(x))>1 else np.mean(x)
-    return (nmx)
-
-def robust_nanmedian(x):
-    nmx = np.nanmedian(x) if np.count_nonzero(~np.isnan(x))>1 else np.median(x)
-    return (nmx)
 
 
 if __name__ == "__main__":

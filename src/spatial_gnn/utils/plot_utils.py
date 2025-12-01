@@ -6,6 +6,8 @@ import pandas as pd
 import seaborn as sns
 import scipy.sparse as sp
 
+from spatial_gnn.utils.metric_utils import get_gene_set_sum_of_log1p
+
 
 def plot_loss_curves(save_dir):
     with open(os.path.join(save_dir, "training.pkl"), 'rb') as handle:
@@ -23,7 +25,8 @@ def plot_loss_curves(save_dir):
     plt.yticks(fontsize=12)
     plt.tight_layout()
     plt.show()
-    plt.savefig(os.path.join(save_dir, "loss_curves.pdf"), bbox_inches='tight')
+    if save_dir is not None:   
+        plt.savefig(os.path.join(save_dir, "loss_curves.pdf"), bbox_inches='tight')
     plt.close()
 
 
@@ -60,7 +63,8 @@ def plot_celltype_performance(save_dir):
     plt.setp(ax.get_legend().get_title(), fontsize='16')
     plt.tight_layout()
     plt.show()
-    plt.savefig(os.path.join(save_dir, "celltype_performance_nonzero_genes.pdf"), bbox_inches='tight')
+    if save_dir is not None:
+        plt.savefig(os.path.join(save_dir, "celltype_performance_nonzero_genes.pdf"), bbox_inches='tight')
     plt.close()
 
 
@@ -175,6 +179,8 @@ def plot_propagation_results_for_gene_set(
     temp_layer,
     fig_title,
     save_path,
+    vmin=0,
+    vmax=6,
     point_size=0.1,
 ):
     """
@@ -185,28 +191,11 @@ def plot_propagation_results_for_gene_set(
     And draw a colorbar on the right.
     """
     coordinates = adata.obsm["spatial"]
-
-    def _get_gene_set_sum_of_log1p(layer, adata, gene_list):
-        """
-        For each cell, compute sum_j log1p(expr[cell, gene_j]).
-        """
-        gene_idx = [adata.var_names.get_loc(g) for g in gene_list]
-
-        if sp.issparse(layer):
-            sub = layer[:, gene_idx].toarray()
-        else:
-            sub = layer[:, gene_idx]
-
-        # sum of log1p over genes
-        return np.log1p(sub).sum(axis=1).ravel()
-
-    orig = _get_gene_set_sum_of_log1p(orig_layer, adata, gene_list)
-    pert = _get_gene_set_sum_of_log1p(pert_layer, adata, gene_list)
-    temp = _get_gene_set_sum_of_log1p(temp_layer, adata, gene_list)
+    orig = get_gene_set_sum_of_log1p(orig_layer, adata, gene_list)
+    pert = get_gene_set_sum_of_log1p(pert_layer, adata, gene_list)
+    temp = get_gene_set_sum_of_log1p(temp_layer, adata, gene_list)
 
     # global min/max
-    vmin, vmax = 0, 6
-
     fig, axes = plt.subplots(1, 3, figsize=(11, 4), sharex=True, sharey=True)
 
     panel_info = [
@@ -243,3 +232,4 @@ def plot_propagation_results_for_gene_set(
 
     if save_path is not None:
         fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()

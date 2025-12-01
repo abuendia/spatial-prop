@@ -9,18 +9,6 @@ from tqdm import tqdm
 from spatial_gnn.models.gnn_model import GNN
 
 
-def load_dataset_config():
-    """Load dataset configurations from JSON file."""
-    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
-    try:
-        with open(config_path, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
-    except json.JSONDecodeError:
-        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
-
-
 def create_dataloader_from_dataset(
     dataset: Dataset,
     batch_size: int = 512,
@@ -51,7 +39,7 @@ def create_dataloader_from_dataset(
 
 def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Union[str, List[str], None]:
     """
-    Parse center_celltypes parameter consistently across the codebase.
+    Parse center_celltypes parameter.
     
     Parameters
     ----------
@@ -77,7 +65,7 @@ def parse_center_celltypes(center_celltypes: Union[str, List[str], None]) -> Uni
 
 def infer_center_celltypes_from_adata(adata_path, top_n: int = 3):
     """
-    Infer center cell types by finding the 3 cell types with the lowest cell counts.
+    Infer center cell types by finding the top_n cell types with the lowest cell counts.
 
     Parameters
     ----------
@@ -88,7 +76,7 @@ def infer_center_celltypes_from_adata(adata_path, top_n: int = 3):
     Returns
     -------
     list
-        List of cell type names with the lowest counts (up to 3, or all if less than 3)
+        List of cell type names with the lowest counts (up to top_n, or all if less than top_n)
     """
     adata = sc.read_h5ad(adata_path)
     celltype_counts = adata.obs['celltype'].value_counts()
@@ -107,7 +95,7 @@ def infer_center_celltypes_from_adata(adata_path, top_n: int = 3):
 
 def parse_gene_list(gene_list: Optional[str]) -> Optional[List[str]]:
     """
-    Parse gene_list parameter consistently across the codebase.
+    Parse gene_list parameter.
     
     Parameters
     ----------
@@ -129,12 +117,21 @@ def parse_gene_list(gene_list: Optional[str]) -> Optional[List[str]]:
         except Exception as e:
             print(f"Warning: Error reading gene_list file {gene_list}: {e}. Using all genes.")
             return None
-    else:
-        print(f"Warning: gene_list file {gene_list} not found. Using all genes.")
-        return None
 
 
-def get_dataset_config(dataset: str, base_path: str) -> tuple:
+def load_dataset_config():
+    """Load dataset configurations from JSON file."""
+    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'datasets.json')
+    try:
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Dataset configuration file not found at {config_path}")
+    except json.JSONDecodeError:
+        raise ValueError(f"Invalid JSON format in dataset configuration file at {config_path}")
+
+
+def get_dataset_info_from_config(dataset: str, base_path: str) -> tuple:
     """
     Get dataset configuration and build common parameters.
     
@@ -191,8 +188,7 @@ def load_model_from_path(model_path: str, device: str) -> torch.nn.Module:
     
     if not os.path.exists(config_path):
         raise FileNotFoundError(
-            f"Model config file not found at {config_path}. "
-            "Please ensure the model was saved with a config.json file."
+            f"Model config file not found at {config_path}."
         )
     
     # Load the model configuration
@@ -213,9 +209,9 @@ def load_model_from_path(model_path: str, device: str) -> torch.nn.Module:
         input_dim=config['input_dim'],
         output_dim=config['output_dim'],
         inject_dim=config['inject_dim'],
+        num_layers=config['num_layers'],
         method=config['method'],
         pool=config['pool'],
-        num_layers=config['num_layers']
     )
     
     # Load the state dictionary
