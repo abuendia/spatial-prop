@@ -2,42 +2,35 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(0)   # 4 GPUs
-JOBS_PER_GPU=1 # how many concurrent jobs per GPU
-BASE=/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn
-PY=$BASE/src/spatial_gnn/scripts/train_gnn_with_celltype.py
-
-DATASETS=("farah")
+GPUS=(0 1 2 3)
+JOBS_PER_GPU=2 # how many concurrent jobs per GPU
+BASE=./
+PY=$BASE/src/spatial_gnn/scripts/train_expression_gnn.py
+GENEPT_EMBEDS_PATH="./data/genept_embeds/zenodo/GenePT_gene_embedding_ada_text.pickle"
+DATASETS=("aging_coronal" "aging_sagittal" "exercise" "reprogramming" "kukanja" "androvic" "zeng" "pilot" "farah")
 LOGDIR="$BASE/logs"
 mkdir -p "$LOGDIR"
-GENEPT_EMBEDS_PATH="/oak/stanford/groups/akundaje/abuen/spatial/spatial-gnn/data/genept_embeds/zenodo/genept_embed/GenePT_gene_embedding_ada_text.pickle"
 
-# (k-hop predict_celltype train_multitask genept_strategy use_oracle_ct ablate_gene_expression use_one_hot_ct, attention_pool, predict_residuals, residual_penalty, debug)
 EXPERIMENTS=(
-  # "3 True False none False False False center False False False" # 3-hop
-  # "2 True False none False False False center True False False" # 2-hop residuals
-  # "2 True False none False False False center center False False" # base 2-hop predict with cell type
-  # "2 True False none False False False GlobalAttention False False False" # 2-hop global attention
-  "3 True False none False False False center False False False" # base 2-hop no cell type (final model)
+  "3 True False none False False False center False False False" # 3-hop
+  "2 True False none False False False center True False False" # 2-hop residuals
+  "2 True False none False False False center center False False" # base 2-hop predict with cell type
+  "2 True False none False False False GlobalAttention False False False" # 2-hop global attention
+  "2 False False none False False False center False False False" # base 2-hop no cell type (final model)
 )
-
 EPOCHS=50
-# ----------------
 
-# FIFO as a GPU token pool
 fifo=$(mktemp -u)
 mkfifo "$fifo"
 exec 3<>"$fifo"
 rm -f "$fifo" 
 
-# seed tokens: each GPU gets $JOBS_PER_GPU slots
 for g in "${GPUS[@]}"; do
   for ((i=0; i<JOBS_PER_GPU; i++)); do
     echo "$g" >&3
   done
 done
 
-# launch jobs (up to JOBS_PER_GPU per GPU at a time)
 for dataset in "${DATASETS[@]}"; do
   for exp_config in "${EXPERIMENTS[@]}"; do
     # Parse tuple
@@ -45,7 +38,6 @@ for dataset in "${DATASETS[@]}"; do
     read -r gpu <&3   # blocks until a GPU is free
 
     {
-      # Build flags and EXP_NAME based on configuration (same logic as run_train_with_celltype.sh)
       if [ "$predict_celltype" = True ]; then
         PREDICT_CELLTYPE_FLAG="--predict_celltype"
 
@@ -147,7 +139,6 @@ for dataset in "${DATASETS[@]}"; do
       log="$LOGDIR/residuals_${dataset}_${EXP_NAME}_${ts}.log"
       echo "[$(date +%T)] start $dataset $EXP_NAME on GPU $gpu -> $log"
 
-      # Run and capture both stdout and stderr to the log file
       CUDA_VISIBLE_DEVICES="$gpu" python "$PY" \
         --dataset "$dataset" \
         --base_path "$BASE/data/raw" \
@@ -174,7 +165,7 @@ for dataset in "${DATASETS[@]}"; do
         >"$log" 2>&1
 
       status=$?
-      echo "$gpu" >&3      # return one GPU slot token
+      echo "$gpu" >&3
       echo "[$(date +%T)] done  $dataset $EXP_NAME on GPU $gpu (exit $status) | log: $log"
       exit $status
     } &
