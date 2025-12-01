@@ -123,6 +123,10 @@ class SpatialAgingCellDataset(Dataset):
         if self.use_ids is not None:
             flat_ids = sorted(self.use_ids)
         self._subset_suffix = "_subset_" + "-".join(flat_ids)
+
+        if self.whole_tissue:
+            # No augmentation for whole tissue
+            self.augment_hop = 0
         
         if embedding_json is not None:
             with open(embedding_json, 'r') as f:
@@ -525,7 +529,7 @@ class SpatialAgingCellDataset(Dataset):
             center_celltypes_to_use = self.center_celltypes
             
         if self.whole_tissue or self.num_cells_per_ct_id is None:
-            cell_idxs = np.arange(sub_adata.shape[0])
+            cell_idxs = np.arange(sub_adata.shape[0])           
         else:
             for ct in center_celltypes_to_use:
                 np.random.seed(444)

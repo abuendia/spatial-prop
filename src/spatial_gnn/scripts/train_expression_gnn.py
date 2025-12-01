@@ -374,7 +374,7 @@ def train_model_from_scratch(
         raise ValueError(f"Loss '{loss}' is not recognized!")
 
     # Training loop
-    model_type = "GenePT" if use_genept else "Baseline"
+    model_type = "GNN with GenePT" if use_genept else "GNN"
     print(f"Starting {model_type} training for {epochs} epochs...")
     best_score = np.inf
     training_results = {"metric": loss, "epoch": [], "train": [], "test": [], "test_spearman": [], "test_celltype_accuracy": []}

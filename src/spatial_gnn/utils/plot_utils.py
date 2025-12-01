@@ -95,14 +95,16 @@ def plot_gene_in_section(adata, gene, layer, title, save_dir):
     cbar = fig_pert.colorbar(sc, cax=cbar_ax)
     cbar.set_label("Expression (log scale)", fontsize=10)
     cbar.ax.tick_params(labelsize=10)
-
-    # save figure
     title_fig = title.replace(" ", "_")
-    fig_pert.savefig(
-        f"{save_dir}/{gene}_{title_fig}.pdf",
-        bbox_inches="tight",
-        dpi=300
-    )
+    plt.show()
+    
+    if save_dir is not None:
+        fig_pert.savefig(
+            f"{save_dir}/{gene}_{title_fig}.pdf",
+            bbox_inches="tight",
+            dpi=300
+        )
+    plt.close()
 
 
 def plot_celltypes_in_section(adata, ct_key="celltype", s=0.5, figsize=(6,6), save_path=None):
@@ -146,29 +148,12 @@ def plot_celltypes_in_section(adata, ct_key="celltype", s=0.5, figsize=(6,6), sa
     )
     ax.axis("off")
 
-    # optional legend
-    handles = [plt.Line2D([0], [0], marker='o', color='w',
-                          label=ct, markerfacecolor=colors[ct], markersize=6)
-               for ct in unique_ct]
+    handles = [plt.Line2D([0], [0], marker='o', color='w', label=ct, markerfacecolor=colors[ct], markersize=6) for ct in unique_ct]
     ax.legend(handles=handles, bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=6)
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
-
-def _get_gene_set_sum_of_log1p(layer, adata, gene_list):
-    """
-    For each cell, compute sum_j log1p(expr[cell, gene_j]).
-    """
-    gene_idx = [adata.var_names.get_loc(g) for g in gene_list]
-
-    if sp.issparse(layer):
-        sub = layer[:, gene_idx].toarray()
-    else:
-        sub = layer[:, gene_idx]
-
-    # sum of log1p over genes
-    return np.log1p(sub).sum(axis=1).ravel()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def plot_propagation_results_for_gene_set(
@@ -195,7 +180,6 @@ def plot_propagation_results_for_gene_set(
     pert = get_gene_set_sum_of_log1p(pert_layer, adata, gene_list)
     temp = get_gene_set_sum_of_log1p(temp_layer, adata, gene_list)
 
-    # global min/max
     fig, axes = plt.subplots(1, 3, figsize=(11, 4), sharex=True, sharey=True)
 
     panel_info = [

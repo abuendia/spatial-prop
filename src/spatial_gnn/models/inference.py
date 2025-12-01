@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import tqdm
+from tqdm import tqdm
 
 from spatial_gnn.utils.perturbation_utils import temper
 
